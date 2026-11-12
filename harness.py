@@ -556,7 +556,7 @@ def check_files(changed, pre):
 # ---------------------------------------------------------------- Stage: Payload parser
 
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
-              "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_STATUS @GIT_COMMIT @GIT_FOLD "
+              "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD "
               "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
@@ -574,7 +574,7 @@ def parse_payload(txt):
     """One state machine: directives are recognized only outside hunk and file bodies."""
     P = {"id": None, "num": None, "title": "", "workspace": None, "goal": None, "ops": [], "notes": [], "probes": [], "xrefs": [],
          "runs": [], "finds": [], "greps": [],
-         "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "warnings": []}
+         "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "warnings": []}
     lines = txt.split("\n")
     n, i, cur_file, stray = len(lines), 0, None, []
 
@@ -705,6 +705,8 @@ def parse_payload(txt):
             P["undo"] = arg
         elif d == "GIT_STATUS":
             P["git_status"] = True
+        elif d == "GIT_INIT":
+            P["git_init"] = arg or True
         elif d == "GIT_FOLD":
             P["git"].append({"kind": "fold", "n": int(arg) if arg.isdigit() else 0})
         elif d == "GIT_COMMIT":
@@ -980,12 +982,67 @@ def git_blockers():
     names = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "index.lock")
     return [x for x in names if os.path.exists(os.path.join(".git", x))]
 
+GITIGNORE_DEFAULT = """# Machine-local harness state (numbering, undo journal, saved runs, graph stamp).
+# goal.md and notes.md are project memory and stay tracked.
+.llm_harness/*
+!.llm_harness/goal.md
+!.llm_harness/notes.md
+__pycache__/
+"""
+
+def carry_state(src, with_state):
+    """Copy machine-local history (journal, saved runs, and optionally the numbering) from src into the current state folder."""
+    for sub in ("history", "runs"):
+        if os.path.isdir(os.path.join(src, sub)):
+            shutil.copytree(os.path.join(src, sub), os.path.join(HARNESS_DIR, sub), dirs_exist_ok=True)
+    if with_state and os.path.isfile(os.path.join(src, "state.json")):
+        os.makedirs(HARNESS_DIR, exist_ok=True)
+        shutil.copyfile(os.path.join(src, "state.json"), STATE_PATH)
+
+def git_init(ident):
+    """@GIT_INIT [Name <email>]: create the repository on main, add the default .gitignore, set this repository's identity when given, switch this run to git mode carrying numbering and undo history, and show the commit identity."""
+    print("\n=== GIT INIT ===")
+    if MODE == "git":
+        print("  already a git repository; nothing to do.")
+        return
+    rc, out, err = run_git(["init", "-b", "main"])
+    if rc != 0:
+        rc, out, err = run_git(["init"])
+        if rc == 0:
+            run_git(["symbolic-ref", "HEAD", "refs/heads/main"])
+    if rc != 0:
+        print("  [FAILED] git init: %s" % (err or out))
+        return
+    print("  " + out.strip())
+    if not os.path.exists(".gitignore"):
+        with open(".gitignore", "w", encoding="utf-8", newline="\n") as f:
+            f.write(GITIGNORE_DEFAULT)
+        print("  wrote .gitignore (machine state ignored; goal.md and notes.md tracked)")
+    old = HARNESS_DIR
+    set_mode("git")
+    carry_state(old, False)
+    print("  this run is now in git mode; numbering and undo history carried over")
+    m = re.match(r"^(.+?)\s*<([^<>@\s]+@[^<>\s]+)>$", ident) if isinstance(ident, str) else None
+    if m:
+        run_git(["config", "user.name", m.group(1).strip()])
+        run_git(["config", "user.email", m.group(2)])
+    elif isinstance(ident, str):
+        print("  [WARNING] identity not understood: expected '@GIT_INIT Name <email>'; nothing was set")
+    name, email = run_git(["config", "user.name"])[1].strip(), run_git(["config", "user.email"])[1].strip()
+    print("  commits will be authored as: %s <%s>" % (name or "(no name set)", email or "(no email set)"))
+    if not name or not email:
+        print("  -> commits will fail until a name and email are set: the user runs git config user.name / user.email in this folder.")
+    elif (name, email) == (run_git(["config", "--global", "user.name"])[1].strip(), run_git(["config", "--global", "user.email"])[1].strip()):
+        print("  -> that is the global identity; if this repository needs another, use '@GIT_INIT Name <email>' or set it here with git config user.name / user.email (no --global) before committing.")
+
 def git_status_report():
     print("\n=== GIT STATUS ===")
     if MODE != "git":
         print("  no-git workspace: there is no repository to report on.")
         return
     _, branch, _ = run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    if run_git(["rev-parse", "-q", "--verify", "HEAD"])[0] != 0:
+        branch = (run_git(["symbolic-ref", "--short", "HEAD"])[1] or "main") + " (no commits yet)"
     rc, up, _ = run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
     line = "  Branch: %s | Upstream: %s" % (branch or "(no commits yet)", up if rc == 0 else "none")
     if rc == 0:
@@ -1824,11 +1881,14 @@ def find_run(num):
 
 def read_only(P):
     """True when a script only reads: no file, note, goal, git, undo or @RUN actions."""
-    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["runs"])
+    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["runs"] or P["git_init"])
 
 def load_state():
     """Numbering and shell from the machine-local state file; the goal from .llm_harness/goal.md, which travels with the project."""
     st = {"last_num": 0, "last_id": "", "committed_through": 0, "goal": "", "shell": ""}
+    if MODE == "git" and not os.path.isfile(STATE_PATH) and os.path.isfile(os.path.join(WORKSPACE_NOTES_DIR, "state.json")):
+        carry_state(WORKSPACE_NOTES_DIR, True)
+        print("  (carried numbering and undo history from .llm_harness/ into git mode)")
     st.update(load_json(STATE_PATH, {}))
     if os.path.isfile(GOAL_PATH):
         st["goal"] = read_text(GOAL_PATH).strip()
@@ -2056,7 +2116,7 @@ def print_card(shell, workspace):
   @RUN [--timeout <s>] <command>                  any other command (tests, builds, installs, CLI tools) in the workspace; default limit 300s; not undoable
   @INIT_DEBUG <slug>                              creates docs/debug/bug_<slug>.txt with its four sections and prints it
   @UNDO <hi>..<lo>  or  @UNDO <number>            reverses journaled scripts, newest first
-""" + (GIT_CARD if MODE == "git" else "  (no-git workspace: git directives are unavailable; @UNDO still works)\n") + """Scopes: TOP | EOF (append; OLD CODE empty) | Name | Class.method | Parent > # Stage anchor | tree node path (a > b)
+""" + (GIT_CARD if MODE == "git" else "  @GIT_INIT [Name <email>]                        makes this folder a git repository (main, default .gitignore, numbering and undo carried over, optional identity for this repository only); other git directives work from then on, even in the same script\n") + """Scopes: TOP | EOF (append; OLD CODE empty) | Name | Class.method | Parent > # Stage anchor | tree node path (a > b)
 A hunk applies only where OLD CODE matches exactly one place, searched in the scope first, then in the whole file.
 @UNDO needs its own script. Commits may open a script that then changes files: the commit runs first and the file changes are skipped if it fails.
 Every script runs in this order: commit, file changes or undo, notes, @RUN, then @GIT_STATUS, listings, searches and probes (so they show the result).
@@ -2146,12 +2206,14 @@ def main():
         state["goal"] = P["goal"]
         write_goal(P["goal"])
         print("  [GOAL SET] " + P["goal"])
+    if P["git_init"]:
+        git_init(P["git_init"])
     if P["undo"] and (P["ops"] or P["git"]):
         print("  [REFUSED] @UNDO must be in its own script (probes, searches, notes and @RUN may ride along). No changes were made.")
         print("  -> resend the undo and the other changes as separate scripts with consecutive numbers.")
     elif P["git"] and MODE != "git":
         print("  [REFUSED] git directives in a no-git workspace. No changes were made.")
-        print("  -> drop the @GIT_* lines (or the user runs 'git init' in the workspace once) and resend.")
+        print("  -> drop the @GIT_* lines, or start the script with @GIT_INIT to make this folder a git repository, and resend.")
     else:
         git_ok = True
         if P["git"]:
