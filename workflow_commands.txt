@@ -10,7 +10,7 @@
 
 [Setup Checklist]:
 1. Once per machine: create the folder `~/.llm_harness` (`mkdir $HOME\.llm_harness` on Windows, `mkdir -p ~/.llm_harness` on Linux) and save `harness.py` and `workflow_commands.txt` into it.
-2. Once per chat session: run the handshake for the project folder. Git is optional: a folder without `.git` runs in no-git mode, which keeps undo but has no git directives.
+2. Once per chat session: run the handshake for the project folder. Git is optional: a folder without `.git` runs in no-git mode, which keeps undo but has no git directives until a script starts with `@GIT_INIT [Name <email>]`, which makes it a repository and keeps its numbering and undo history.
    Windows: `python $HOME\.llm_harness\harness.py --workspace "D:\path\to\project"`
    Linux: `python3 ~/.llm_harness/harness.py --workspace ~/path/to/project`
    (Git Bash or WSL on Windows: add `--shell bash`.)
@@ -32,7 +32,7 @@ Before the first script fence of a session, the handshake output (a line contain
 - **L1 Rule — `[L1-Harness]`:** `Every terminal action is ONE harness script: 0 raw shell commands outside it (@RUN covers installs, builds, tests, CLI tools) | nothing to run but an answer still pending -> a script with no directives reprints the footer | git only via @GIT_* | never print harness.py source or a substitute script`
 
 [Every-Turn Format — the conversation carries this pattern]:
-Before EVERY script fence output the 10-Label Manifest below (never omit a label; write `None` inline when inactive). `Talk` is the conversation itself: findings, opinions and their reasons, doubts, open questions and disagreements, in free prose of whatever length the content needs, never boilerplate. `After` declares the intended next action once this script's output is received. After the closing fence, add a plain-text **"What to Test & Restart Checklist"**.
+Before EVERY script fence output the 10-Label Manifest below (never omit a label; write `None` inline when inactive). `Talk` is the conversation itself: findings, opinions and their reasons, doubts, open questions and disagreements, in free prose of whatever length the content needs, never boilerplate. `After` declares the intended next action once this script's output is received. After the closing fence, add a plain-text **"What to Test & Restart Checklist"**. The checklist describes only what the user should see; anything the user must type goes alone in its own code block labelled "Type this", never inside a checklist line or the manifest.
 Pack each script with everything that is already known to be needed: the probes and searches for the next step ride along with every script, a verified commit opens the script that carries the next change, and a test or build `@RUN` follows the change it checks.
 
 Here's the script [<ACT>-XX: <Short Action Title>] that:

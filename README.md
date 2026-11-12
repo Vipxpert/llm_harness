@@ -31,7 +31,7 @@ Run the handshake for the project folder:
 
     python $HOME\.llm_harness\harness.py --workspace "D:\path\to\project"
 
-Then open a new chat and paste three things: `workflow_commands.txt`, the handshake output, and your task. The handshake prints the syntax card (every directive and the exact fence wrapper for your shell), the project's goal and its notes. Use `--shell bash` for Git Bash or WSL. Projects with a `.git` folder run in git mode; any other folder runs in no-git mode, which keeps undo but has no git directives.
+Then open a new chat and paste three things: `workflow_commands.txt`, the handshake output, and your task. The handshake prints the syntax card (every directive and the exact fence wrapper for your shell), the project's goal and its notes. Use `--shell bash` for Git Bash or WSL. Projects with a `.git` folder run in git mode; any other folder runs in no-git mode, which keeps undo but has no git directives until `@GIT_INIT [Name <email>]` turns it into a repository, carrying its numbering and undo history over.
 
 ## What the AI can do
 
@@ -44,7 +44,7 @@ Then open a new chat and paste three things: `workflow_commands.txt`, the handsh
 | Dead code | `@PROBE <file> \| Unused` (candidates with call-graph and text evidence) |
 | Run anything else | `@RUN [--timeout <s>] <command>` (tests, builds, installs, CLI tools) |
 | Project memory | `@GOAL`, `@NOTE_ADD / EDIT / REMOVE / LIST`, `@INIT_DEBUG` |
-| History | `@UNDO`, `@GIT_STATUS`, `@GIT_COMMIT`, `@GIT_FOLD` |
+| History | `@UNDO`, `@GIT_INIT`, `@GIT_STATUS`, `@GIT_COMMIT`, `@GIT_FOLD` |
 
 The syntax card printed by the handshake is the authoritative reference.
 
