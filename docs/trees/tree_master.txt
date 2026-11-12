@@ -10,7 +10,7 @@
     ├── # Stage: Payload parser (One state machine for every directive; flags malformed hunks; holds the @INIT_DEBUG ledger skeleton)
     ├── # Stage: Executing file operations (Applies hunks and file ops in memory, writes once, checks syntax, prints the scorecard, next-step hints and TREE SYNC REMINDER)
     ├── # Stage: Journal and undo (Per-script journal with pre-image snapshots; @UNDO restores snapshots or reverse-applies hunks)
-    ├── # Stage: Git (Status report; pre-flight-guarded path-scoped commits and unpushed-commit folding that restore HEAD on any failure; commits may include .llm_harness/goal.md, notes.md and .gitignore)
+    ├── # Stage: Git (@GIT_INIT creates the repository with an optional identity and default .gitignore and carries numbering and undo history into git mode, also automatically after a hand-typed git init; status report; pre-flight-guarded path-scoped commits and unpushed-commit folding that restore HEAD on any failure; commits may include .llm_harness/goal.md, notes.md and .gitignore)
     ├── # Stage: Read-only directives (Workspace file enumeration, directory listings, @XREF dispatch and whole-word text references)
     ├── # Stage: Code graph (optional codebase-memory-mcp backend) (callers / callees / impact through the CBM CLI with a labelled text fallback)
         ├── run_cbm() (One-shot CBM CLI call; CBM keeps every project's index in its per-user cache, so a moved or cloned project rebuilds its index instead of carrying it)
