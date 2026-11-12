@@ -1,0 +1,132 @@
+# /llm_harness/workflow_commands.txt
+#* Utility setup [One-Time, User-Performed]
+[Why This Exists — Read Once, Do Not Echo]:
+1. One Folder Serves Every Project: `harness.py` and this file live together in one folder (`~/.llm_harness`). Each script names its project with an `@WORKSPACE` line, so scripts can be pasted from any terminal folder and two projects can never be confused. Every project keeps two kinds of state. Project memory (pinned goal and notes) lives in `.llm_harness/` at the project root and travels with the project; commit it in git projects. Machine-local history (script numbering and undo journal) lives inside `.git/llm_harness/` for git projects, or `.llm_harness/` without git, and starts fresh on a new clone.
+2. The User Installs, the AI Never Re-Types: `harness.py` is static Python stdlib (about 1,800 lines). The user saves it by hand once; the AI only checks that the handshake is visible.
+3. Three Facts Shape Everything Below:
+   - A rule that is complete in its short form IS the rule. Each `L1 Rule` line in this file is the only copy of that rule; no paragraph restates it.
+   - Only rules that do not show up in every turn are repeated: rare-event rules and prohibitions. The AI never echoes them. After every run, `harness.py` reads the `L1 Rule` lines out of this file and prints them, together with the pinned goal, at the end of its output. A rule tagged `(git)` is printed only for git projects. Editing a line here changes what is printed everywhere.
+   - What the harness can teach through its own output is not written here at all: the payload grammar arrives once in the handshake's SYNTAX CARD, and recovery instructions arrive as `->` lines at the moment a hunk fails, a tree update is missed, a command fails or a paste is stale.
+
+[Setup Checklist]:
+1. Once per machine: create the folder `~/.llm_harness` (`mkdir $HOME\.llm_harness` on Windows, `mkdir -p ~/.llm_harness` on Linux) and save `harness.py` and `workflow_commands.txt` into it.
+2. Once per chat session: run the handshake for the project folder. Git is optional: a folder without `.git` runs in no-git mode, which keeps undo but has no git directives.
+   Windows: `python $HOME\.llm_harness\harness.py --workspace "D:\path\to\project"`
+   Linux: `python3 ~/.llm_harness/harness.py --workspace ~/path/to/project`
+   (Git Bash or WSL on Windows: add `--shell bash`.)
+3. First message of the chat: this file, the handshake output, and the task.
+4. Optional, for call-graph searches: install codebase-memory-mcp. The harness finds it on its own and falls back to text search without it.
+To have the AI change `harness.py` or this file, use `~/.llm_harness` itself as the workspace.
+
+[Session Start — Read Once, Do Not Echo]:
+Before the first script fence of a session, the handshake output (a line containing `llm_harness v3` with `workspace:` and the SYNTAX CARD) must be visible in the conversation. Take the fence wrapper, the `@WORKSPACE` line, the mode and the first script number from it. If it is missing, or pasted output shows that `harness.py` cannot be opened, reply with the Setup Checklist only and stop.
+#
+
+
+#* Turn manifest & standing rules (core)
+[Why This Exists — Read Once, Do Not Echo]:
+1. The Goal Is Pinned by the Harness: `@GOAL <text>` stores the user's long-term goal in the workspace, and every harness run prints it in its footer next to the standing rules. The AI sets it in the first script of a project and again only when the user changes direction; the manifest carries just the current aim.
+2. Action-Encoded Script IDs: Prefixing the script number with exact action letters (`P` = Probe/Search, `C` = Code Change, `D` = Docs/Tree Change, `R` = Run Command, `G` = Git Action, `U` = Undo/Reverse, `N` = Notes — e.g., `[CDP-105]`, `[CR-106]`, `[GP-107]`, `[U-108]`) makes the terminal history and undo stack self-documenting at a glance. Numbers strictly increment across sessions; the harness prints the next free number after every run and refuses any number that is not strictly greater than the last executed number. A lost output is recovered by pasting the same script again: an identical re-paste replays the saved output without running anything, and an old read-only script with no saved output simply runs again.
+3. Standing Rules Arrive by Paste: The footer of each pasted harness output (goal and `L1 CONTRACT`) is the live copy of the goal and of the `L1 Rule` lines of this file. It is applied, never echoed. Because only harness runs print it, every terminal action goes through the harness.
+
+- **L1 Rule — `[L1-Harness]`:** `Every terminal action is ONE harness script: 0 raw shell commands outside it (@RUN covers installs, builds, tests, CLI tools) | nothing to run but an answer still pending -> a script with no directives reprints the footer | git only via @GIT_* | never print harness.py source or a substitute script`
+
+[Every-Turn Format — the conversation carries this pattern]:
+Before EVERY script fence output the 10-Label Manifest below (never omit a label; write `None` inline when inactive). `Talk` is the conversation itself: findings, opinions and their reasons, doubts, open questions and disagreements, in free prose of whatever length the content needs, never boilerplate. `After` declares the intended next action once this script's output is received. After the closing fence, add a plain-text **"What to Test & Restart Checklist"**.
+Pack each script with everything that is already known to be needed: the probes and searches for the next step ride along with every script, a verified commit opens the script that carries the next change, and a test or build `@RUN` follows the change it checks.
+
+Here's the script [<ACT>-XX: <Short Action Title>] that:
+
+Talk: <What you found, what you think and why, how sure you are, what is still open, anything you disagree with>
+Current aim: <Specific functional progress this script achieves toward the pinned goal>
+Update these code:
+- /<path/to/file> (<Scope: ClassName.method_name / Parent > # Stage anchor, ...>)
+Update these docs:
+- /docs/trees/tree_master.txt (<Node path>)
+Git / undo actions: None
+Run these commands: None
+Inspect these code:
+- /<path/to/file> (<Scope, line range, TOC, tree node + depth, xref, find or grep>)
+Recursive path listing: None
+Non-recursive path listing: None
+After: <What you intend to do after receiving and reviewing this script's output>
+#
+
+
+#* Optimal code rules (core)
+[Why This Exists — Read Once, Do Not Echo]:
+Opportunistic alignment (`# Stage` comments, docstrings, tree sorting) exists ONLY to keep code that we are actively modifying (`C`) clean on the way. Halting feature work or generating standalone turns to add comments/anchors to untouched or merely-inspected files is a critical failure mode.
+
+- **L1 Rule — `[L1-Scope]`:** `Current request ONLY | 0 unrequested refactors/renames | 0 comment-, docstring-, format- or tree-only scripts | # Stage comments ONLY inside scopes whose logic this script modifies`
+- **L1 Rule — `[L1-Notes]`:** `@NOTE_ADD ONLY for facts a later session needs that code, tree, kb and ledgers don't hold (env quirks, user decisions, deferred work) | @NOTE_REMOVE once done or stale`
+
+[Every-Turn Format — the conversation carries this pattern]:
+1. Micro-hunks with 1–3 context lines, at most 200 new/modified lines per script. Full files only for a small new file.
+2. Single-responsibility methods/files. Every newly written or modified class, method and stage anchor carries a concise present-state description: `# <Stage/Step Name> (<Conceptual description>)`, zero historical changelogs.
+3. Hybrid turns: patch what is already known and probe what is unseen in one `[CP-XX]` / `[CDP-XX]` script. Probes run after the hunks of the same script, so they show the post-patch state.
+#
+
+
+#* Tree structure definition (core)
+[Why This Exists — Read Once, Do Not Echo]:
+1. One File, Read by Level: `docs/trees/tree_master.txt` is the single O(1) architectural index. It can grow without limit because it is never loaded whole: a `Tree` probe prints one node and its descendants down to the requested depth and collapses everything deeper into `<<+N hidden>>` counts. Adding detail means appending one more layer under an existing node (folder -> file -> class -> method -> `# Stage`), not creating another file.
+2. Node Paths Make Repeated Names Safe: Tree hunks and tree probes address a node by path (`app.py > Beta`), so identical lines such as `__init__()` under different classes never collide.
+3. The Tree Is Curated, the Graph Is Generated: the tree records what each part is for; the optional code graph behind `@XREF ... | callers` records who calls whom. Neither is ever written from the other.
+
+[Every-Turn Format — the conversation carries this pattern]:
+1. Lookup by level: probe `TOP` at depth 1–2, then one node at depth 1–2. A node name that is unique anywhere in the tree resolves directly; otherwise qualify it with its parent. The tree is not read with `Lines` or `Scope` probes.
+2. A script that adds, removes, renames or changes a file, route, class, method or `# Stage` anchor updates the matching tree node in the same script (in `tree_master.txt`, or in the vertical `tree_*.txt` that holds that node), scoped by the parent node path. The harness prints a TREE SYNC REMINDER when one is missed.
+3. Format: 4 spaces per depth, a child 4 spaces deeper than its parent's connector, no `|` or `│` guide bars, present state only, siblings in their top-to-bottom physical order on disk.
+4. Tree and graph together: the tree says what a part is for, `@XREF <name> | callers / callees / impact` says who uses it, and the source settles it. Locate through the tree, check reach through the graph before changing anything shared, then read the code; `@PROBE <file> | Refs | <scope>` lists what that scope uses and where each piece is defined, so the next probes go straight to them. Code the graph finds but the tree doesn't list is undocumented: give it a node only when a script modifies it.
+5. Drift: when work starts in an area, run `@PROBE /docs/trees/<tree file> | Check`; it lists nodes whose file, function or `# Stage` anchor no longer exists. Fix a stale node in the script that next touches its file.
+
+[Reference — Read Once, Do Not Echo]:
+1. Root line `/<project> (Role)`; below it the source folders, then the `/docs/knowledge` and `/docs/debug` branches.
+2. Node forms: `/folder (Role)` | `file.ext (Role & mount)` | `-> ClassName / singleton (Role)` | `method_name() (Behavior)` or `() route_handler (VERB /path: behavior)` | `[Props]`, `[Emit]`, `[State]`, `[Template]`, `[Methods]`, `[Computed]` (Vue SFCs) | `# <Stage/Step Name> (<Conceptual description>)` | `...` (undocumented code continues below).
+3. Legacy vertical `docs/trees/tree_*.txt` files stay registered as leaf nodes; their content moves under that node only when that subtree is next modified.
+#
+
+
+#* Git version control & commit rules (core)
+[Why This Exists — Read Once, Do Not Echo]:
+1. Verified Before Locked: Never mixing unverified changes with a commit keeps every patch freely testable and cascade-undoable across multiple turns before it is locked into Git history. A commit may open the script that carries the next change, because the commit runs first and only covers work the user already verified.
+2. The Gate Is Code: The harness refuses undo mixed with commits, aborts on an in-progress merge/rebase/cherry-pick/revert/bisect or `index.lock`, refuses detached HEAD, folds only commits that exist on no remote, restores the original HEAD if any step fails, skips the script's file changes when its commit fails, and refuses `@RUN` git commands that change history. It has no push directive. What it cannot check is whether the user has verified the change, so that stays a rule. Projects without git never see this rule.
+
+- **L1 Rule — `[L1-Git Gate]` (git):** `Commit ONLY in a [G] script AFTER the user confirms verification (the next change and probes may ride in the same script) | unknown branch state -> @GIT_STATUS first | 1.Code (feat|fix|refactor|perf|build(<scope>): ...) 2.Docs (docs(trees): ...) | verified tweak to unpushed commits -> @GIT_FOLD <n> + re-slice the same commits | 0 push: the user runs git push`
+#
+
+
+#* External verification & hallucination gate (core)
+[Why This Exists — Read Once, Do Not Echo]:
+1. Breaking the Blind Trial-and-Error Loop: When dealing with fast-moving SDKs, version upgrades, or obscure libraries, an LLM's internal weights degrade into plausible-sounding guesswork. Guessing an API signature triggers a multi-turn cascade of compiler/runtime failures that pollutes history and wastes tokens.
+2. Search First, Halt When Unverified: Prioritizing live official documentation via search tools—or reading a locally installed tool's own help through `@RUN`, or halting to ask the user for docs/samples when a package is private/obscure—eliminates hallucinated imports and nonexistent method calls before a single line of code is written.
+3. Claims Carry Their Evidence: A conclusion that reaches further than its evidence reads as fact and gets reversed later. The commonest case is an absence claim ("X can't do Y") drawn from one place that was checked. Naming each decision-relevant claim's source keeps the gap visible, so a correction becomes the expected next step instead of a reversal.
+
+- **L1 Rule — `[L1-No-Guess]`:** `0 guessed signatures/imports/unseen code | 0 re-probes of code already verbatim in context | local symbol, caller, file or string -> @XREF/@FIND/@GREP/@PROBE, never ask the user to find it | changing a function other code uses -> @XREF <fn> | callers (or | impact) BEFORE the [C] | deleting code -> @PROBE <file> | Unused, confirm each candidate in source; 0 deletes on a name search alone | local CLI tool -> @RUN its --help | versioned API, framework migration or obscure package -> search official docs BEFORE any [C] | unverifiable or no search tool -> HALT: name what is missing, request a doc link, header or working sample`
+- **L1 Rule — `[L1-Evidence]`:** `Tag decision-relevant claims: seen / tested / recalled / inferred / reported | absence = "not found in <where looked>", never "doesn't exist" | untested on the user's OS or version -> say so | firm recommendation on open facts -> name what would change it`
+#
+
+
+#* Knowledge base curation & master registry (core)
+[Why This Exists — Read Once, Do Not Echo]:
+1. High-Signal, De-Contextualized Wisdom: Logging every minor fix or project-specific rule turns a knowledge base into unreadable noise. `docs/knowledge/kb_<tech>.txt` exists strictly to capture hard-won, empirically verified truths from heavy debugging sessions or recurring AI blind spots—distilled into generic, project-agnostic engineering laws that transfer cleanly to any future repository.
+2. Single Root of Truth in `tree_master.txt`: Registering every knowledge file and active bug ledger as a tree node guarantees the AI always knows what institutional memory exists; one depth-2 tree probe of the two branches lists them all.
+
+- **L1 Rule — `[L1-Knowledge]`:** `kb_<tech>.txt entry ONLY for a cause proven by direct test after a multi-turn debug, or a recurring AI error | NEVER if simultaneous changes masked the cause | 0 project context: generic 1-3L rule under # Stage: <Sub-Topic>, added via @HUNK scoped to that anchor | kb files, their anchors and active bug ledgers are tree_master nodes`
+
+[Reference — Read Once, Do Not Echo]:
+1. Registry branches in `tree_master.txt`, after the source folders:
+   - `|-- /docs/knowledge (Verified Tech Knowledge Bases)` -> `kb_<tech>.txt (Clustered generic invariants & pitfalls for <tech>)` -> one child per `# Stage: <Sub-Topic>` anchor
+   - `\-- /docs/debug (Active Bug & Checklist Ledgers)` -> `bug_<slug>.txt (Status: ACTIVE | RESOLVED — Root cause & checklist summary)`
+2. Example of stripping project context: instead of *"Moving CubeShape out of DontDestroyOnLoad broke RemoveScrew()"*, write *"[Unity Physics/Joints] Calling Destroy() on a Joint/Rigidbody component takes effect at the end of the frame after FixedUpdate; to force immediate wake/detachment on a connected body, explicitly set connectedBody = null and call WakeUp()."*
+#
+
+
+#* Anti-loop debug ledger & functionality checklist (core)
+[Why This Exists — Read Once, Do Not Echo]:
+1. Defeating Context Amnesia in Long Debug Sessions: When a complex feature or bug resists 2 consecutive patches, chat-based reasoning degrades—the AI loses track of which invariants actually passed, forgets which code scopes were already mutated, and loops back to failed approaches.
+2. Externalizing State to `docs/debug/bug_<slug>.txt`: Pausing blind code mutations to maintain an on-disk ledger anchors the exact state of reality. `@INIT_DEBUG <slug>` creates the ledger with its four sections and prints it, so the section template lives in the harness, not here.
+3. Certainty Is Spent Once: "The root cause is obvious" is the exit an AI will always want to take. Allowing that shortcut a single time per bug keeps quick fixes quick while guaranteeing that a second miss lands in the ledger.
+
+- **L1 Rule — `[L1-Debug]`:** `Failed step or unexpected behaviour -> A) belongs to a later milestone: say so, continue | B) cause unmistakable in visible code/logs: direct fix, ONCE per bug | C) needs a re-plan: propose it, wait for approval | else, or B spent, or 2 failed [C] on one bug -> STOP [C]: [DP] with @INIT_DEBUG <slug> (or ledger hunks) + the next @XREF/@PROBE | NEVER retry an Eliminated Approach | user-verified fix -> mark the ledger RESOLVED, graduate a non-obvious generic lesson to kb`
+#

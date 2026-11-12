@@ -1,0 +1,6 @@
+# Machine-local harness state (numbering, undo journal, saved runs, graph stamp).
+# goal.md and notes.md are project memory and stay tracked.
+.llm_harness/*
+!.llm_harness/goal.md
+!.llm_harness/notes.md
+__pycache__/
