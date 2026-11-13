@@ -29,6 +29,8 @@ T_MID = chr(0x251c) + chr(0x2500) * 2 + " "
 T_END = chr(0x2514) + chr(0x2500) * 2 + " "
 T_BAR = chr(0x2502)
 OLD_M, NEW_M, END_M = "--- [OLD CODE] ---", "+++ [NEW CODE] +++", "=== [END HUNK] ==="
+TXT_OLD, TXT_NEW, TXT_END = "--- [OLD TEXT] ---", "+++ [NEW TEXT] +++", "=== [END TEXT] ==="
+TEXT_MIN = 12
 
 # ---------------------------------------------------------------- Stage: IO helpers
 
@@ -562,7 +564,7 @@ def check_files(changed, pre):
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
               "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD @SIDE "
               "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP @SESSION @SCOPE @SCOPE_END @SESSION_END "
-              "@MESSAGE @SCOPE_REQUEST @BRAKE @BRAKE_ACK @REPEATABLE")
+              "@MESSAGE @SCOPE_REQUEST @BRAKE @BRAKE_ACK @REPEATABLE @TEXT_REPLACE")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
 
@@ -686,6 +688,33 @@ def parse_payload(txt):
                     repl_s = "\n".join(new).strip("\n") if find_s else "\n".join(new).rstrip("\n")
                     P["ops"].append({"type": "hunk", "file": cur_file, "scope": scope, "label": label, "find": find_s, "replace": repl_s})
                     i = e
+        elif d == "TEXT_REPLACE":
+            target, _, rest = arg.partition("|")
+            m = re.search(r"\bexpect\s+(\d+)", rest)
+            expect = int(m.group(1)) if m else 1
+            label = re.sub(r"\bexpect\s+\d+", "", rest).strip(" |") or "Text replace"
+            j = i + 1
+            while j < n and not lines[j].strip():
+                j += 1
+            if j >= n or lines[j].rstrip() != TXT_OLD:
+                bad("text", target.strip(), label, "expected '%s' right after @TEXT_REPLACE" % TXT_OLD, i)
+            else:
+                k = j + 1
+                while k < n and lines[k].rstrip() != TXT_NEW:
+                    k += 1
+                e = k + 1
+                while e < n and lines[e].rstrip() != TXT_END:
+                    e += 1
+                old, new = lines[j + 1:k], lines[k + 1:e]
+                if k >= n or e >= n:
+                    bad("text", target.strip(), label, "missing '%s' or '%s'" % (TXT_NEW, TXT_END), i)
+                elif len(old) != 1 or len(new) > 1:
+                    bad("text", target.strip(), label, "OLD TEXT and NEW TEXT are one line each; use @HUNK for multi-line changes", i)
+                elif len(old[0]) < TEXT_MIN:
+                    bad("text", target.strip(), label, "OLD TEXT needs at least %d characters so it cannot hit the wrong place; include more of the line" % TEXT_MIN, i)
+                else:
+                    P["ops"].append({"type": "text", "file": target.strip(), "scope": "TEXT", "label": label, "find": old[0], "replace": new[0] if new else "", "expect": expect})
+                i = e
         elif d == "DELETE_FILE":
             P["ops"].append({"type": "delete", "file": arg, "scope": "TOP", "label": "Delete file"})
         elif d == "RENAME":
@@ -842,6 +871,21 @@ def execute_ops(ops):
                 touch(rel)
             elif st in ("MISMATCH", "AMBIGUOUS"):
                 fails.append((op, text))
+        elif op["type"] == "text_file":
+            if text is None:
+                op["status"], op["detail"] = "MISMATCH", "file does not exist"
+                continue
+            lines = text.split("\n")
+            at = [i for i in range(op["lo"], min(op["hi"], len(lines))) if op["find"] in lines[i]]
+            if sum(lines[i].count(op["find"]) for i in at) != op["count"]:
+                op["status"], op["detail"] = "MISMATCH", "an earlier change in this script moved or altered the matches; send the text replacement in its own script"
+                continue
+            for i in at:
+                lines[i] = lines[i].replace(op["find"], op["replace"])
+            cur[rel] = "\n".join(lines)
+            touch(rel)
+            shown = lines[at[0]].strip()
+            op["status"], op["detail"] = "OK", "line %d now: %s" % (at[0] + 1, shown if len(shown) <= 110 else shown[:110] + "...")
         elif op["type"] == "new_file":
             if text is not None and op.get("init"):
                 op["status"], op["detail"] = "ALREADY APPLIED", "ledger exists: update it with @FILE hunks scoped by its # Stage anchors"
@@ -2362,6 +2406,44 @@ def grant_cli():
         save_json(grants_path(), g)
     print("%s: session %s %s write access to %s despite other sessions' scopes" % (flag[2:].upper() + "ED" if flag == "--grant" else "REVOKED", sess, "gets" if flag == "--grant" else "loses", pattern))
 
+def expand_text_ops(P):
+    """Check each @TEXT_REPLACE's total match count against its expect, then turn it into one edit per file it touches."""
+    out = []
+    for op in P["ops"]:
+        if op.get("type") != "text" or op.get("malformed") or op.get("blocked"):
+            out.append(op)
+            continue
+        path, _, scope = op["file"].partition("#")
+        target = path.strip().replace("\\", "/").lstrip("/")
+        files = [target] if target and os.path.isfile(target) else [f for f in repo_files(".") if path_in(f, target or "**")]
+        hits, per_file = [], []
+        for f in files:
+            if safe_rel(f) is None or os.path.getsize(f) > 2000000:
+                continue
+            raw = read_bytes(f)
+            if b"\0" in raw[:4096]:
+                continue
+            lines = decode_bytes(raw)[0].split("\n")
+            lo, hi = 0, len(lines)
+            if scope.strip():
+                lo, hi, note = resolve_scope(f, lines, scope.strip())
+                if note:
+                    continue
+            found = [(i, lines[i].count(op["find"])) for i in range(lo, min(hi, len(lines))) if op["find"] in lines[i]]
+            if found:
+                hits += [(f, i, c) for i, c in found]
+                per_file.append((f, lo, hi, sum(c for _, c in found)))
+        total = sum(c for _, _, c in hits)
+        if total != op["expect"]:
+            where = ", ".join("/%s:%d" % (f, i + 1) for f, i, _ in hits[:12]) + (" ..." if len(hits) > 12 else "")
+            op["blocked"] = "found %d occurrence(s), expected %d%s; nothing was replaced. Check with @GREP and resend with the right scope or expect" % (total, op["expect"], (": " + where) if hits else "")
+            out.append(op)
+            continue
+        for f, lo, hi, count in per_file:
+            out.append({"type": "text_file", "file": f, "scope": "TEXT" + (" " + scope.strip() if scope.strip() else ""), "label": "%s (%d here)" % (op["label"], count),
+                        "find": op["find"], "replace": op["replace"], "lo": lo, "hi": hi, "count": count})
+    P["ops"] = out
+
 def side_allowed(P):
     """A @SIDE script may only read, search and @RUN: no file, note, goal, git or undo actions."""
     return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"])
@@ -2647,6 +2729,13 @@ def print_card(shell, workspace):
   @NEW_FILE /<path>  <content>  @END_NEW_FILE     each on its own line; rejected if the file exists
   @DELETE_FILE /<path>
   @RENAME /<old> -> /<new>                        later hunks in the same script use the new path
+  @TEXT_REPLACE <file, file#Class.method, folder or glob> | expect <N> | <label>   then these marker lines (one line of text each):
+  --- [OLD TEXT] ---
+  <exact text, at least 12 characters, found exactly N times in that scope (default N = 1)>
+  +++ [NEW TEXT] +++
+  <replacement; empty removes it>
+  === [END TEXT] ===
+  (for a small change inside a long line, or the same change across many files, e.g. import paths after a move; take N from a @GREP)
   @PROBE /<path> | Scope | <scope>                prints that scope (500-line cap)
   @PROBE /<path> | Lines | <start>-<end>
   @PROBE /<path> | TOC                            signatures and # Stage anchors
@@ -2784,6 +2873,7 @@ def main():
     send_messages(P)
     if P["scope"] is not None or P["scope_end"] or P["session_end"]:
         apply_scope_change(P)
+    expand_text_ops(P)
     guard_ops(P)
     if P["goal"]:
         state["goal"] = P["goal"]
