@@ -564,7 +564,7 @@ def check_files(changed, pre):
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
               "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD @SIDE "
               "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP @SESSION @SCOPE @SCOPE_END @SESSION_END "
-              "@MESSAGE @SCOPE_REQUEST @BRAKE @BRAKE_ACK @REPEATABLE @TEXT_REPLACE")
+              "@MESSAGE @SCOPE_REQUEST @BRAKE @BRAKE_ACK @REPEATABLE @TEXT_REPLACE @VERDICT @VERDICTS")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
 
@@ -582,7 +582,8 @@ def parse_payload(txt):
     P = {"id": None, "num": None, "title": "", "workspace": None, "goal": None, "ops": [], "notes": [], "probes": [], "xrefs": [], "helps": [],
          "runs": [], "finds": [], "greps": [],
          "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "session": None,
-         "scope": None, "scope_end": False, "session_end": False, "session_aim": None, "msgs": [], "brake_ack": False, "repeatable": False, "warnings": []}
+         "scope": None, "scope_end": False, "session_end": False, "session_aim": None, "msgs": [], "brake_ack": False, "repeatable": False,
+         "verdicts": [], "verdict_lists": [], "warnings": []}
     lines = txt.split("\n")
     n, i, cur_file, stray = len(lines), 0, None, []
 
@@ -618,6 +619,10 @@ def parse_payload(txt):
             P["session_end"] = arg.strip() or True
         elif d in ("MESSAGE", "SCOPE_REQUEST", "BRAKE"):
             P["msgs"].append(({"MESSAGE": "message", "SCOPE_REQUEST": "scope request", "BRAKE": "brake"}[d], arg))
+        elif d == "VERDICT":
+            P["verdicts"].append(arg)
+        elif d == "VERDICTS":
+            P["verdict_lists"].append(arg)
         elif d == "REPEATABLE":
             P["repeatable"] = True
         elif d == "BRAKE_ACK":
@@ -1063,6 +1068,7 @@ GITIGNORE_DEFAULT = """# Machine-local harness state (numbering, undo journal, s
 .llm_harness/*
 !.llm_harness/goal.md
 !.llm_harness/notes.md
+!.llm_harness/verdicts.json
 __pycache__/
 """
 
@@ -1139,7 +1145,7 @@ def git_status_report():
     if len(rows) > 60:
         print("    ... +%d more" % (len(rows) - 60))
 
-MEMORY_FILES = {p: p for p in (WORKSPACE_NOTES_DIR + "/goal.md", WORKSPACE_NOTES_DIR + "/notes.md", ".gitignore")}
+MEMORY_FILES = {p: p for p in (WORKSPACE_NOTES_DIR + "/goal.md", WORKSPACE_NOTES_DIR + "/notes.md", WORKSPACE_NOTES_DIR + "/verdicts.json", ".gitignore")}
 
 def run_git_ops(ops):
     """Pre-flight guard, optional fold of unpushed commits, path-scoped commits; any failure restores the original HEAD."""
@@ -1947,6 +1953,119 @@ def note_inspection(rel, lines, a, b):
         print("  [REVISIT] /%s %s was read %s ago by %s (%s) and has not changed since" % (rel, name, when, "session " + prev["session"] if prev.get("session") else "a script without a session", prev.get("script") or "?"))
     if len(again) > 6:
         print("  [REVISIT] ... and %d more unchanged definitions read before" % (len(again) - 6))
+    show_verdicts_for(rel, ["%s#%s" % (rel, name) for name in units])
+
+_VERDICT_SHOWN = set()
+
+def verdicts_path():
+    return os.path.join(WORKSPACE_NOTES_DIR, "verdicts.json")
+
+def verdict_inventory(target):
+    """Fingerprints of what a verdict covers: a folder's files, a file, or one file#Class.method; None when the target does not exist."""
+    path, _, scope = target.partition("#")
+    if scope:
+        if not os.path.isfile(path):
+            return None
+        lines = read_text(path).split("\n")
+        lo, hi, note = resolve_scope(path, lines, scope)
+        return None if note else {target: hashlib.sha1("\n".join(lines[lo:hi]).encode("utf-8", "surrogateescape")).hexdigest()}
+    if os.path.isfile(path):
+        return {path: sha_of(path)}
+    if not os.path.isdir(path or "."):
+        return None
+    return {f: sha_of(f) for f in repo_files(".") if path_in(f, path or "**")}
+
+def verdict_changes(v, target):
+    """(new, changed, deleted) files under a verdict since it was recorded."""
+    inv, old = verdict_inventory(target) or {}, v.get("inventory", {})
+    return [f for f in inv if f not in old], [f for f in inv if f in old and inv[f] != old[f]], [f for f in old if f not in inv]
+
+def tree_description(target):
+    """The description of the tree node that names this path, from any tree file, or ''."""
+    base = target.split("#")[0].strip("/")
+    name = base.split("/")[-1]
+    for t in sorted(glob.glob(os.path.join("docs", "trees", "*.txt"))):
+        for _, _, label in tree_nodes(read_text(t).split("\n")):
+            key = tree_key(label).strip("/")
+            if key and (key == base or key == name or base.endswith("/" + key)):
+                m = re.search(r"\((.*)\)\s*$", label)
+                if m:
+                    return m.group(1)[:140]
+    return ""
+
+def record_verdicts(P):
+    """@VERDICT <folder, file or file#Class.method> | <verdict> | <note>: a conclusion about that area, fingerprinted so later changes mark it stale."""
+    if not P["verdicts"]:
+        return
+    with state_lock():
+        data = load_json(verdicts_path(), {"verdicts": {}})
+        for arg in P["verdicts"]:
+            parts = [x.strip() for x in arg.split("|")]
+            target = parts[0].replace("\\", "/").strip("/")
+            word = parts[1] if len(parts) > 1 else ""
+            if not target or not word:
+                print("  [VERDICT REFUSED] expected '@VERDICT <path> | <verdict> | <note>' (or '| clear'): %s" % arg)
+                continue
+            if word.lower() == "clear":
+                print("  [VERDICT CLEARED] /%s" % target if data["verdicts"].pop(target, None) else "  [VERDICT] nothing to clear at /%s" % target)
+                continue
+            inv = verdict_inventory(target)
+            if inv is None:
+                print("  [VERDICT REFUSED] /%s is not an existing folder, file or resolvable file#Class.method" % target)
+                continue
+            data["verdicts"][target] = {"verdict": word, "note": " | ".join(parts[2:]), "session": CURRENT_SESSION, "script": CURRENT_SCRIPT, "time": time.time(), "inventory": inv}
+            print("  [VERDICT] /%s: %s%s (%d fingerprint(s) kept)" % (target, word, (" - " + " | ".join(parts[2:])) if parts[2:] else "", len(inv)))
+        os.makedirs(WORKSPACE_NOTES_DIR, exist_ok=True)
+        save_json(verdicts_path(), data)
+    if MODE == "git" and run_git(["check-ignore", "-q", verdicts_path().replace("\\", "/")])[0] == 0:
+        print("  -> .llm_harness/verdicts.json is ignored by .gitignore, so verdicts will not travel with the project: add the line !.llm_harness/verdicts.json")
+
+def show_verdicts_for(rel, scoped):
+    """While reading code, show each verdict that covers it (once per run), with a stale warning when its area changed since."""
+    data = load_json(verdicts_path(), {"verdicts": {}})["verdicts"]
+    for target, v in sorted(data.items()):
+        base = target.split("#")[0]
+        covers = target in scoped if "#" in target else (rel == base or rel.startswith(base + "/") or not base)
+        if not covers or target in _VERDICT_SHOWN:
+            continue
+        _VERDICT_SHOWN.add(target)
+        new, changed, gone = verdict_changes(v, target)
+        stale = " [STALE VERDICT: %d new, %d changed, %d deleted since]" % (len(new), len(changed), len(gone)) if new or changed or gone else ""
+        print("  [VERDICT] /%s: %s%s (session %s)%s" % (target, v["verdict"], (" - " + v["note"]) if v.get("note") else "", v.get("session") or "none", stale))
+
+def list_verdicts(arg):
+    """@VERDICTS [all | stale | session <name>]: verdicts as path, tree description and conclusion; a parent verdict hides children that say the same."""
+    data = load_json(verdicts_path(), {"verdicts": {}})["verdicts"]
+    a = arg.strip()
+    if a.lower().startswith("session "):
+        who = a.split(None, 1)[1].strip()
+        items, label = {p: v for p, v in data.items() if v.get("session") == who}, "session " + who
+    elif a.lower() in ("all", "stale"):
+        items, label = dict(data), a.lower()
+    elif CURRENT_SESSION:
+        items, label = {p: v for p, v in data.items() if v.get("session") == CURRENT_SESSION}, "session " + CURRENT_SESSION
+    else:
+        items, label = dict(data), "all"
+    print("\n=== VERDICTS (%s) ===" % label)
+    shown = 0
+    for p in sorted(items):
+        v, base = items[p], p.split("#")[0]
+        above = [q for q in items if q != p and "#" not in q and (base == q or base.startswith(q + "/") or not q)]
+        if above and items[max(above, key=len)]["verdict"] == v["verdict"]:
+            continue
+        new, changed, gone = verdict_changes(v, p)
+        if a.lower() == "stale" and not (new or changed or gone):
+            continue
+        age = time.time() - v.get("time", time.time())
+        when = "%dm" % (age // 60) if age < 7200 else ("%dh" % (age // 3600) if age < 172800 else "%dd" % (age // 86400))
+        desc = tree_description(p)
+        print("  /%s%s [%s]%s" % (p, "/" if "#" not in p and os.path.isdir(base or ".") else "", v["verdict"], (" " + v["note"]) if v.get("note") else ""))
+        print("      session %s, %s ago (%s)%s" % (v.get("session") or "none", when, v.get("script") or "?", (" | tree: " + desc) if desc else ""))
+        if new or changed or gone:
+            print("      [STALE VERDICT] %d new, %d changed, %d deleted since: %s" % (len(new), len(changed), len(gone), ", ".join("/" + f for f in (new + changed + gone)[:6])))
+        shown += 1
+    if not shown:
+        print("  (none)")
 
 def run_probe(spec):
     parts = [p.strip() for p in spec.split("|")]
@@ -2498,7 +2617,7 @@ def expand_text_ops(P):
 
 def side_allowed(P):
     """A @SIDE script may only read, search and @RUN: no file, note, goal, git or undo actions."""
-    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"])
+    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"] or P["verdicts"])
 
 def side_run_path(raw_txt):
     return os.path.join(runs_dir(), "side_%s.json" % payload_key(raw_txt)[:16])
@@ -2524,7 +2643,7 @@ def find_run(num):
 
 def read_only(P):
     """True when a script only reads: no file, note, goal, git, undo or @RUN actions."""
-    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["runs"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"])
+    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["runs"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"] or P["verdicts"])
 
 def load_state():
     """Numbering and shell from the machine-local state file; the goal from .llm_harness/goal.md, which travels with the project."""
@@ -2762,6 +2881,8 @@ def print_card(shell, workspace):
   @GOAL <text>                                    pins the user's long-term goal in .llm_harness/goal.md (travels with the project); every run prints it in the footer
   @SIDE                                           runs the script outside the numbering (its @SCRIPT needs no number; only reads, searches and @RUN), so a second chat can work in a project another chat drives; an identical re-paste replays
   @REPEATABLE                                     the script runs on every paste, also an identical one, so the user can rerun it or edit its values by hand (no number; only reads, searches and @RUN)
+  @VERDICT <folder, file or file#Class.method> | <verdict> | <note>   a conclusion about that area, kept in .llm_harness/verdicts.json (travels with git); later changes there mark it STALE; '| clear' removes it
+  @VERDICTS [all | stale | session <name>]       lists verdicts with the tree's description; a folder verdict hides children that say the same (default: this session's)
   @SCOPE <aim> | <path or glob>, ...              declares or changes this session's write scope; other sessions are told once; their scopes are refused to this session's file changes
   @SCOPE_END    @SESSION_END                      release this session's scope / end the session; refused while its changes are uncommitted, unless followed by 'handover'
   @MESSAGE <session> | <text>                     a note for another session, shown once on its next run (labelled as from an AI, not the user)
@@ -2974,10 +3095,13 @@ def main():
         timed(run_grep, g)
     for s in P["xrefs"]:
         timed(run_xref, s)
+    record_verdicts(P)
     for pr in P["probes"]:
         timed(run_probe, pr)
     for h in P["helps"]:
         print_help(h, state.get("shell") or shell)
+    for arg in P["verdict_lists"]:
+        list_verdicts(arg)
     save_state(state)
     save_run(P, raw_txt, tee.text()[start:])
     if P["git"] and not (P["ops"] or P["runs"] or P["probes"] or P["xrefs"] or P["greps"] or P["finds"] or P["list_dir"] or P["list_rec"] or P["notes"] or P["helps"]
