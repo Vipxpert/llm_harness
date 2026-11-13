@@ -55,7 +55,7 @@ Then open a new chat and paste three things: `workflow_commands.txt`, the handsh
 
 | Purpose | Directives |
 |---|---|
-| Change files | `@FILE` + `@HUNK`, `@NEW_FILE`, `@DELETE_FILE`, `@RENAME` |
+| Change files | `@FILE` + `@HUNK`, `@NEW_FILE`, `@DELETE_FILE`, `@RENAME`, `@TEXT_REPLACE` (count-locked text edits inside a line, a scope or a whole folder) |
 | Read code | `@PROBE <file> \| Scope / Lines / TOC`, `@PROBE <file> \| Refs \| <scope>` (what a scope uses and where each piece is defined) |
 | Search | `@FIND` (files by name), `@GREP` (text or regex), `@XREF <name>` (references), `@XREF <name> \| callers / callees / impact` (code graph) |
 | Architecture tree | `@PROBE <tree> \| Tree \| <node> \| <depth>`, `@PROBE <tree> \| Check` (drift check) |
