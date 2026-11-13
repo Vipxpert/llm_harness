@@ -1291,13 +1291,16 @@ def index_gaps(exe, project):
             gaps[parts[0].replace("\\", "/")] = text % (parts[1] if len(parts) > 1 else "?") if "%s" in text else text
     return gaps
 
+_COVERAGE_SHOWN = []
+
 def print_coverage_note(focus=None):
     """Warn when a graph answer may be incomplete because CBM parsed some source files only partly."""
     gaps = load_json(GRAPH_PATH, {}).get("gaps") or {}
     if focus and focus in gaps:
         print("  -> coverage: /%s itself was %s, so the graph may miss definitions or calls in it" % (focus, gaps[focus]))
     code = [p for p in gaps if p != focus and p.endswith(CODE_EXTS)]
-    if code:
+    if code and not _COVERAGE_SHOWN:
+        _COVERAGE_SHOWN.append(True)
         print("  -> coverage: %d source file(s) were only partly indexed (%s); graph links inside them may be missing" % (len(code), ", ".join("/%s %s" % (p, gaps[p]) for p in code[:3])))
 
 def ensure_graph_index(exe, force=False):
@@ -1605,12 +1608,22 @@ def graph_definitions(rel):
     rc, out, err = run_cbm(exe, ["search_graph", "--project", project, "--file-pattern", "*" + rel, "--limit", "2000"], 120)
     if rc is None or rc != 0:
         return None, "search_graph failed: " + ((cbm_clean(err) or cbm_clean(out)).splitlines() or ["no output"])[-1]
-    rows, here = [], None
+    rows, here, refs, in_refs = [], None, {}, False
+    expand = lambda tok: (lambda m: refs.get(m.group(1), "") + m.group(2) if m else tok)(re.match(r"^@(\d+)\+(.*)$", tok))
     for ln in cbm_clean(out).split("\n"):
+        if ln.startswith("results_refs:"):
+            in_refs = True
+            continue
+        if in_refs:
+            r = re.match(r"^\s+(\d+)\s+(\S+)\s*$", ln)
+            if r:
+                refs[r.group(1)] = r.group(2)
+                continue
+            in_refs = False
         f = UNUSED_FLAT_RE.match(ln)
         if f:
-            if f.group(3).replace("\\", "/") == rel:
-                rows.append((f.group(1).rsplit(".", 1)[-1], f.group(2), int(f.group(4)), int(f.group(5)), int(f.group(6))))
+            if expand(f.group(3)).replace("\\", "/") == rel:
+                rows.append((expand(f.group(1)).rsplit(".", 1)[-1], f.group(2), int(f.group(4)), int(f.group(5)), int(f.group(6))))
             continue
         h = UNUSED_HEAD_RE.match(ln)
         if h:
@@ -1637,6 +1650,8 @@ def check_unused(rel, lines):
     """Candidates for deletion: definitions in one file that nothing calls (call graph) and that no other line mentions (text)."""
     rows, why = graph_definitions(rel)
     source = "call graph + text"
+    if rows == [] and text_definitions(lines):
+        rows, why = None, "the graph listed no definitions for this file, though it has some"
     if rows is None:
         rows, source = text_definitions(lines), "text only (graph unavailable: %s)" % why
     skip = re.compile(r"^(__\w+__|main|init)$")
