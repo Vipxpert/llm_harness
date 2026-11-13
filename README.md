@@ -25,6 +25,17 @@ The harness runs locally and makes no model API calls of its own, so it needs no
 
 Lost an output, or pasted twice? Paste the same script again. An identical re-paste replays the saved output and runs nothing; an old read-only script with no saved output simply runs again.
 
+## Several chats on one project
+
+Several chats can work in the same project at once, each on its own goal:
+
+- Each chat names itself with `@SESSION <name>` on every script and leaves the script number out; the harness assigns numbers under a lock, so two chats never collide.
+- Before changing files, a chat declares `@SCOPE <aim> | <paths or globs>`. A scope that overlaps another session's is refused when it is declared.
+- Every other session is told about a scope change once, the next time it runs. The harness cannot push a message into another chat window; it informs each chat when that chat runs.
+- File changes made through the harness inside another session's scope are refused. Changes made by `@RUN` commands are detected and reported, not prevented, because the harness cannot know in advance what a command will write.
+- `@UNDO` only reverses the session's own scripts, and `@GIT_FOLD` is refused while other sessions hold scopes.
+- Only you can override a scope: `python harness.py --workspace <folder> --grant <session> <path or glob>` (or `--revoke`), typed in your own terminal. A script that tries to run it is refused.
+
 ## Install (once per machine)
 
 Put `harness.py` and `workflow_commands.txt` in `~/.llm_harness`. `setup.cmd` (Windows) and `setup.sh` (Linux/macOS) do this for you, back up the previous version, offer to install or update the optional code graph (CBM), and pause at the end so you can read the result.
