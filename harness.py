@@ -2122,7 +2122,7 @@ A hunk applies only where OLD CODE matches exactly one place, searched in the sc
 Every script runs in this order: commit, file changes or undo, notes, @RUN, then @GIT_STATUS, listings, searches and probes (so they show the result).
 A script with no directives is valid: it just prints the footer (next number, goal, standing rules).
 Tree files: write |-- and \\-- connectors; they are stored as box glyphs. Every file gets a '/<project>/<path>' comment as its first line automatically.""")
-    print("Notes are stored in .llm_harness/notes.md, may ride along with any script, and are not reversed by @UNDO.")
+    print("Notes are the user's: add, edit or remove them only when the user explicitly asks. They are stored in .llm_harness/notes.md, may ride along with any script, and are not reversed by @UNDO.")
     print("Inside a fence write %s for three consecutive backticks and https%s for a URL scheme; both are decoded before matching." % (SENT_BT3, "@@" + "://"))
     print("Lines beginning with '->' in harness output are instructions for your next turn.")
 
