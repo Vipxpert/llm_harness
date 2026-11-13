@@ -12,6 +12,10 @@ Agent apps run commands on your machine by themselves. In a chat window the AI c
 
 No API key, no MCP server, no agent permissions. Python 3 standard library only.
 
+## Cost model
+
+The harness runs locally and makes no model API calls of its own, so it needs no separately metered LLM API. You can drive it from a monthly AI chat subscription, using that plan's included usage rather than paying per API request. That can be more predictable or more economical than an API-metered agent workflow. Some coding agents are also offered through subscriptions, and every plan has usage limits, so the actual cost depends on the provider, the plan, the workload and how much context each session consumes.
+
 ## The loop
 
 1. You describe the task.
