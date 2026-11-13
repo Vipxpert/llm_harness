@@ -556,7 +556,7 @@ def check_files(changed, pre):
 # ---------------------------------------------------------------- Stage: Payload parser
 
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
-              "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD "
+              "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD @SIDE "
               "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
@@ -574,7 +574,7 @@ def parse_payload(txt):
     """One state machine: directives are recognized only outside hunk and file bodies."""
     P = {"id": None, "num": None, "title": "", "workspace": None, "goal": None, "ops": [], "notes": [], "probes": [], "xrefs": [],
          "runs": [], "finds": [], "greps": [],
-         "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "warnings": []}
+         "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "warnings": []}
     lines = txt.split("\n")
     n, i, cur_file, stray = len(lines), 0, None, []
 
@@ -707,6 +707,8 @@ def parse_payload(txt):
             P["git_status"] = True
         elif d == "GIT_INIT":
             P["git_init"] = arg or True
+        elif d == "SIDE":
+            P["side"] = True
         elif d == "GIT_FOLD":
             P["git"].append({"kind": "fold", "n": int(arg) if arg.isdigit() else 0})
         elif d == "GIT_COMMIT":
@@ -1878,10 +1880,20 @@ def payload_key(txt):
 def runs_dir():
     return os.path.join(HARNESS_DIR, "runs")
 
+def side_allowed(P):
+    """A @SIDE script may only read, search and @RUN: no file, note, goal, git or undo actions."""
+    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"])
+
+def side_run_path(raw_txt):
+    return os.path.join(runs_dir(), "side_%s.json" % payload_key(raw_txt)[:16])
+
 def save_run(P, raw_txt, body):
     """Keep a run's output (without its footer) for replay; only the newest RUNS_KEEP runs are kept."""
     d = runs_dir()
     os.makedirs(d, exist_ok=True)
+    if P.get("side"):
+        save_json(side_run_path(raw_txt), {"id": P["id"], "key": payload_key(raw_txt), "output": body})
+        return
     for old in glob.glob(os.path.join(d, "%06d_*.json" % P["num"])):
         os.remove(old)
     name = "%06d_%s.json" % (P["num"], re.sub(r"[^A-Za-z0-9_-]", "_", P["id"]))
@@ -2102,6 +2114,7 @@ def print_card(shell, workspace):
         print("At most 120 payload lines per script and nothing after HARNESS_EOF (serial/SSH paste safety); split larger changes into consecutive numbers.")
     print("""Directives:
   @GOAL <text>                                    pins the user's long-term goal in .llm_harness/goal.md (travels with the project); every run prints it in the footer
+  @SIDE                                           runs the script outside the numbering (its @SCRIPT needs no number; only reads, searches and @RUN), so a second chat can work in a project another chat drives; an identical re-paste replays
   @NOTE_ADD <text>                                adds a persistent workspace note
   @NOTE_EDIT <note-id> <text>                     edits an existing note
   @NOTE_REMOVE <note-id>                          removes an existing note
@@ -2198,10 +2211,20 @@ def main():
     print("  Workspace: %s | %s" % (os.path.abspath("."), mode_label()))
     state = load_state()
     start, rerun = len(tee.text()), False
-    if P["num"] is None:
+    if P["side"]:
+        if not side_allowed(P):
+            print("  [REFUSED] a @SIDE script may only read, search and @RUN; file changes, notes, goal, git and undo belong to the numbered scripts of the chat that drives this project. Nothing was run.")
+            return print_footer(state)
+        prior = load_json(side_run_path(raw_txt), None)
+        if prior:
+            print("  [REPLAY] this @SIDE script already ran and this paste is identical, so nothing was run again. Its saved output:")
+            print(prior.get("output", "").rstrip("\n"))
+            return print_footer(state)
+        print("  [SIDE] runs outside the numbering: no script number used, nothing journaled")
+    elif P["num"] is None:
         print("  [REFUSED] missing '@SCRIPT [<ACT>-<number>: <title>]' as the first payload line. Nothing was run.")
         return print_footer(state)
-    if P["num"] <= state["last_num"]:
+    elif P["num"] <= state["last_num"]:
         prior = find_run(P["num"])
         if prior and prior.get("key") == payload_key(raw_txt):
             print("  [REPLAY] [%s] already ran and this paste is identical, so nothing was run again. Its saved output:" % P["id"])
@@ -2215,7 +2238,7 @@ def main():
         print("  [RE-RUN] [%s] is older than [%s] but only reads and has no saved output, so it runs again; the numbering is unchanged." % (P["id"], state["last_id"]))
     for w in P["warnings"]:
         print("  [WARNING] " + w)
-    if not rerun:
+    if not rerun and not P["side"]:
         state["last_num"], state["last_id"] = P["num"], P["id"]
     if P["goal"]:
         state["goal"] = P["goal"]
