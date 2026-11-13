@@ -3,4 +3,5 @@
 .llm_harness/*
 !.llm_harness/goal.md
 !.llm_harness/notes.md
+!.llm_harness/verdicts.json
 __pycache__/
