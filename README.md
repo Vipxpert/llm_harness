@@ -54,7 +54,7 @@ The syntax card printed by the handshake is the authoritative reference.
 - A Python or Go syntax error after patching restores the file.
 - Every change is journaled; `@UNDO` restores the exact previous files.
 - Commits happen only through git directives, after you confirm the change works. The harness aborts during a merge or rebase, never pushes, and refuses `@RUN git commit` and similar commands.
-- Script numbers only go up: an old or reused number is refused, apart from the replay and re-run cases above.
+- Script numbers only go up: an old or reused number is refused, apart from the replay and re-run cases above. A second chat can work alongside with `@SIDE` scripts, which skip the numbering and may only read, search and run commands.
 
 ## Project memory and machine state
 

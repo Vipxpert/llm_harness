@@ -18,7 +18,7 @@
         └── graph_xref() (Runs trace_path, resolves shared names, falls back to text matches labelled NOT proven)
     ├── # Stage: File and text search (@FIND by name or glob; @GREP by text or regex with an optional path filter)
     ├── # Stage: Running commands (@RUN in PowerShell or bash with timeout, process-tree kill and head/tail output, refusing history-changing git; also the TOC, tree, tree drift check, unused-code, scope-references and scope/lines probe printers, and the call-site search behind callers)
-    └── # Stage: Entry point (Machine-local state, saved run output that replays on an identical re-paste, the goal kept in .llm_harness/goal.md so it travels with the project, per-directive and total run timings, footer with mode-filtered L1 lines from workflow_commands.txt, workspace mode switch, notes, syntax card, handshake and main)
+    └── # Stage: Entry point (Machine-local state, saved run output that replays on an identical re-paste, @SIDE scripts outside the numbering, the goal kept in .llm_harness/goal.md so it travels with the project, per-directive and total run timings, footer with mode-filtered L1 lines from workflow_commands.txt, workspace mode switch, notes, syntax card, handshake and main)
 ├── README.md (Human guide: why a chat-interface harness, the paste loop, install, sessions, directives, safety model, memory, optional CBM, rules)
 ├── setup.cmd (Windows installer: copies harness.py and workflow_commands.txt into %USERPROFILE%\.llm_harness with a timestamped backup, offers a CBM install or update, and always ends with a status line and a pause)
 ├── setup.sh (POSIX installer: same steps as setup.cmd using curl or wget; a finish handler prints the status and pauses in terminals, NO_PAUSE=1 skips it)
