@@ -1674,7 +1674,7 @@ def check_unused(rel, lines):
                 for m in pat.finditer(ln):
                     if info and info[0] == m.group(1):
                         continue
-                    call = re.match(r"\s*\(", ln[m.end():]) is not None
+                    call = f.endswith(CODE_EXTS) and re.match(r"\s*\(", ln[m.end():]) is not None
                     hits[m.group(1)].append((f, i + 1, call))
     found = []
     for name, kind, a, b, _ in cands:
