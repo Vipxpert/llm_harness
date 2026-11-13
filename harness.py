@@ -564,7 +564,7 @@ def check_files(changed, pre):
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
               "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD @SIDE "
               "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP @SESSION @SCOPE @SCOPE_END @SESSION_END "
-              "@MESSAGE @SCOPE_REQUEST @BRAKE @BRAKE_ACK @REPEATABLE @TEXT_REPLACE @VERDICT @VERDICTS")
+              "@MESSAGE @SCOPE_REQUEST @BRAKE @BRAKE_ACK @REPEATABLE @TEXT_REPLACE @VERDICT @VERDICTS @CAMPAIGN @CAMPAIGN_END")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
 
@@ -583,7 +583,7 @@ def parse_payload(txt):
          "runs": [], "finds": [], "greps": [],
          "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "session": None,
          "scope": None, "scope_end": False, "session_end": False, "session_aim": None, "msgs": [], "brake_ack": False, "repeatable": False,
-         "verdicts": [], "verdict_lists": [], "warnings": []}
+         "verdicts": [], "verdict_lists": [], "campaigns": [], "warnings": []}
     lines = txt.split("\n")
     n, i, cur_file, stray = len(lines), 0, None, []
 
@@ -623,6 +623,8 @@ def parse_payload(txt):
             P["verdicts"].append(arg)
         elif d == "VERDICTS":
             P["verdict_lists"].append(arg)
+        elif d in ("CAMPAIGN", "CAMPAIGN_END"):
+            P["campaigns"].append((d, arg))
         elif d == "REPEATABLE":
             P["repeatable"] = True
         elif d == "BRAKE_ACK":
@@ -1601,6 +1603,85 @@ def print_toc(lines):
         if is_toc_line(l):
             print("  L%d: %s" % (i + 1, l.rstrip()[:110]))
 
+def tree_node_paths(lines):
+    """{line index: workspace path} for the folder and file nodes of a tree file, resolved the way the drift check does."""
+    proj = "/" + project_name()
+    out, folders = {}, []
+    for i, d, label in tree_nodes(lines):
+        while folders and folders[-1][0] >= d:
+            folders.pop()
+        key = tree_key(label)
+        if key.startswith("/"):
+            path = key[len(proj):] if key == proj or key.startswith(proj + "/") else key
+            segs = [s for s in path.split("/") if s]
+            base = ("/".join(segs) if len(segs) != 1 or not folders else folders[-1][1] + "/" + segs[0]).strip("/")
+            folders.append((d, base))
+            out[i] = base
+            continue
+        parts = [p.strip() for p in key.split(" / ")]
+        if parts and all(re.match(r"^[\w.\-]+\.[A-Za-z0-9]+$", p) for p in parts):
+            out[i] = ((folders[-1][1] if folders else "") + "/" + parts[0]).strip("/")
+    return out
+
+def tree_verdict_mark(verdicts, path):
+    v = verdicts.get(path) if path else None
+    if not v:
+        return ""
+    new, changed, gone = verdict_changes(v, path)
+    return "  <<verdict: %s%s%s>>" % (v["verdict"], " (campaign %s)" % v["campaign"] if v.get("campaign") else "", ", STALE" if new or changed or gone else "")
+
+def active_campaigns():
+    try:
+        return load_json(verdicts_path(), {}).get("campaigns", {}) or {}
+    except Exception:
+        return {}
+
+def apply_campaigns(P):
+    """@CAMPAIGN <name> | <word> = <meaning>; ...  starts a sweep with its verdict legend; @CAMPAIGN_END <name> ends it and removes its verdicts."""
+    if not P["campaigns"]:
+        return
+    with state_lock():
+        data = load_json(verdicts_path(), {"verdicts": {}})
+        camps = data.setdefault("campaigns", {})
+        for kind, arg in P["campaigns"]:
+            name, _, legend = arg.partition("|")
+            name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name.strip()).strip("-")
+            if not name:
+                print("  [CAMPAIGN REFUSED] a campaign needs a name: %s" % arg)
+                continue
+            if kind == "CAMPAIGN_END":
+                if name not in camps:
+                    print("  [CAMPAIGN] no active campaign named %s" % name)
+                    continue
+                gone = [p for p, v in data["verdicts"].items() if v.get("campaign") == name]
+                for p in gone:
+                    del data["verdicts"][p]
+                del camps[name]
+                print("  [CAMPAIGN ENDED] %s: %d verdict(s) removed" % (name, len(gone)))
+                continue
+            words = {}
+            for item in legend.split(";"):
+                w, _, meaning = item.partition("=")
+                if w.strip():
+                    words[w.strip()] = meaning.strip()
+            if not words:
+                print("  [CAMPAIGN REFUSED] expected '@CAMPAIGN <name> | <word> = <meaning>; <word> = <meaning>'")
+                continue
+            camps[name] = {"legend": words, "started": time.time(), "by": CURRENT_SESSION}
+            print("  [CAMPAIGN] %s: %s" % (name, "; ".join("%s = %s" % kv for kv in words.items())))
+        os.makedirs(WORKSPACE_NOTES_DIR, exist_ok=True)
+        save_json(verdicts_path(), data)
+
+def print_footer_campaigns():
+    """While a campaign runs, every footer names it with its legend and how many areas carry its verdicts."""
+    camps = active_campaigns()
+    if not camps:
+        return
+    verdicts = load_json(verdicts_path(), {"verdicts": {}}).get("verdicts", {})
+    for name, cv in sorted(camps.items()):
+        n = sum(1 for v in verdicts.values() if v.get("campaign") == name)
+        print("=== CAMPAIGN %s (%d area(s) with a verdict): %s ===" % (name, n, "; ".join("%s = %s" % kv for kv in cv.get("legend", {}).items())))
+
 def probe_tree(lines, target, depth):
     """Print a tree node and its descendants down to a relative depth; deeper levels collapse to a count."""
     if target.strip().upper() in ("", "TOP"):
@@ -1613,7 +1694,7 @@ def probe_tree(lines, target, depth):
             return
         nodes, first, stop = pos
         limit, path = nodes[first][1] + depth, tree_path(nodes, first)
-    rows = []
+    rows, paths, verdicts = [], tree_node_paths(lines), load_json(verdicts_path(), {"verdicts": {}})["verdicts"]
     for j in range(first, stop):
         i, d, _ = nodes[j]
         if d > limit:
@@ -1622,8 +1703,8 @@ def probe_tree(lines, target, depth):
         while e < stop and nodes[e][1] > d:
             e += 1
         hidden = e - j - 1 if d == limit else 0
-        rows.append(lines[i] + ("  <<+%d hidden>>" % hidden if hidden else ""))
-    print("--- [Tree: %s | depth %d | %d of %d nodes shown | <<+N hidden>> marks collapsed levels and is not on disk] ---" % (path, depth, len(rows), stop - first))
+        rows.append(lines[i] + ("  <<+%d hidden>>" % hidden if hidden else "") + tree_verdict_mark(verdicts, paths.get(i)))
+    print("--- [Tree: %s | depth %d | %d of %d nodes shown | <<+N hidden>> and <<verdict: ...>> are added by the harness and are not on disk] ---" % (path, depth, len(rows), stop - first))
     print("\n".join(rows))
     if len(rows) < stop - first:
         print("  -> expand one node with: @PROBE /<this file> | Tree | <node path> | <depth>")
@@ -2013,7 +2094,10 @@ def record_verdicts(P):
             if inv is None:
                 print("  [VERDICT REFUSED] /%s is not an existing folder, file or resolvable file#Class.method" % target)
                 continue
-            data["verdicts"][target] = {"verdict": word, "note": " | ".join(parts[2:]), "session": CURRENT_SESSION, "script": CURRENT_SCRIPT, "time": time.time(), "inventory": inv}
+            camps = [c for c, cv in data.get("campaigns", {}).items() if word in cv.get("legend", {})]
+            if data.get("campaigns") and not camps:
+                print("  -> '%s' is not a word of any active campaign's legend (%s); recorded as an ordinary verdict" % (word, "; ".join("%s: %s" % (c, ", ".join(cv.get("legend", {}))) for c, cv in data["campaigns"].items())))
+            data["verdicts"][target] = {"verdict": word, "note": " | ".join(parts[2:]), "session": CURRENT_SESSION, "script": CURRENT_SCRIPT, "time": time.time(), "inventory": inv, "campaign": camps[0] if camps else None}
             print("  [VERDICT] /%s: %s%s (%d fingerprint(s) kept)" % (target, word, (" - " + " | ".join(parts[2:])) if parts[2:] else "", len(inv)))
         os.makedirs(WORKSPACE_NOTES_DIR, exist_ok=True)
         save_json(verdicts_path(), data)
@@ -2617,7 +2701,7 @@ def expand_text_ops(P):
 
 def side_allowed(P):
     """A @SIDE script may only read, search and @RUN: no file, note, goal, git or undo actions."""
-    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"] or P["verdicts"])
+    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"] or P["verdicts"] or P["campaigns"])
 
 def side_run_path(raw_txt):
     return os.path.join(runs_dir(), "side_%s.json" % payload_key(raw_txt)[:16])
@@ -2643,7 +2727,7 @@ def find_run(num):
 
 def read_only(P):
     """True when a script only reads: no file, note, goal, git, undo or @RUN actions."""
-    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["runs"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"] or P["verdicts"])
+    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["runs"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"] or P["msgs"] or P["brake_ack"] or P["verdicts"] or P["campaigns"])
 
 def load_state():
     """Numbering and shell from the machine-local state file; the goal from .llm_harness/goal.md, which travels with the project."""
@@ -2685,11 +2769,12 @@ def print_footer(state):
         print("\n=== NEXT SCRIPT NUMBER: %d ===" % (state["last_num"] + 1))
         print_goal(state)
         print_footer_notes()
+        print_footer_campaigns()
     try:
         with open(RULES_PATH, "r", encoding="utf-8") as f:
             found = re.findall(r"(?m)^- \*\*L1 Rule\W*(\[[^\]]+\])`?\s*(?:\(([\w-]+)\))?[`:*\s]*(.*)$", f.read())
         modes = {"git": "git", "nogit": "nogit", "no-git": "nogit"}
-        rules = [(tag, body) for tag, cond, body in found if not cond or modes.get(cond.lower(), MODE) == MODE]
+        rules = [(tag, body) for tag, cond, body in found if not cond or (bool(active_campaigns()) if cond.lower() == "campaign" else modes.get(cond.lower(), MODE) == MODE)]
     except OSError:
         print("=== L1 CONTRACT: workflow_commands.txt not found next to harness.py (%s); no standing rules printed ===" % SELF_DIR)
         return
@@ -2883,6 +2968,8 @@ def print_card(shell, workspace):
   @REPEATABLE                                     the script runs on every paste, also an identical one, so the user can rerun it or edit its values by hand (no number; only reads, searches and @RUN)
   @VERDICT <folder, file or file#Class.method> | <verdict> | <note>   a conclusion about that area, kept in .llm_harness/verdicts.json (travels with git); later changes there mark it STALE; '| clear' removes it
   @VERDICTS [all | stale | session <name>]       lists verdicts with the tree's description; a folder verdict hides children that say the same (default: this session's)
+  @CAMPAIGN <name> | <word> = <meaning>; ...      starts a sweep (only when the user asks): its verdict words, a footer line and the [L1-Campaign] rule while it runs; Tree probes show <<verdict: ...>> on marked nodes
+  @CAMPAIGN_END <name>                            ends the sweep and removes every verdict it recorded
   @SCOPE <aim> | <path or glob>, ...              declares or changes this session's write scope; other sessions are told once; their scopes are refused to this session's file changes
   @SCOPE_END    @SESSION_END                      release this session's scope / end the session; refused while its changes are uncommitted, unless followed by 'handover'
   @MESSAGE <session> | <text>                     a note for another session, shown once on its next run (labelled as from an AI, not the user)
@@ -3095,6 +3182,7 @@ def main():
         timed(run_grep, g)
     for s in P["xrefs"]:
         timed(run_xref, s)
+    apply_campaigns(P)
     record_verdicts(P)
     for pr in P["probes"]:
         timed(run_probe, pr)
