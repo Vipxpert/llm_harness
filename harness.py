@@ -6,7 +6,7 @@
 #   python harness.py --workspace "<project folder>"
 import os, sys, re, json, glob, time, zlib, base64, fnmatch, hashlib, shutil, contextlib, subprocess, warnings
 
-VERSION = "3.2"
+VERSION = "3.3"
 WORKSPACE_NOTES_DIR = ".llm_harness"
 MODE = "git"
 HARNESS_DIR = os.path.join(".git", "llm_harness")
@@ -440,6 +440,10 @@ def apply_match(rel, content, scope, find_s, repl_s):
             rh = find_exact(lines, repl, a, b) or find_fuzzy(lines, repl, a, b)
             if len(rh) == 1:
                 return content, "ALREADY APPLIED", None
+    if len(needle) == 1 and needle[0].strip():
+        part = [i for i, l in enumerate(lines) if needle[0].strip() in l and l.strip() != needle[0].strip()]
+        if len(part) == 1:
+            return content, "MISMATCH", "OLD CODE is only part of line %d; hunks match whole lines, so copy that full line into OLD CODE" % (part[0] + 1)
     return content, "MISMATCH", note
 
 def print_diagnostics(rel, content, scope, find_s, status, detail):
@@ -2637,6 +2641,8 @@ def main():
         print_help(h, state.get("shell") or shell)
     save_state(state)
     save_run(P, raw_txt, tee.text()[start:])
+    if P["git"] and not (P["ops"] or P["runs"] or P["probes"] or P["xrefs"] or P["greps"] or P["finds"] or P["list_dir"] or P["list_rec"] or P["notes"] or P["helps"]):
+        print("\n  -> this script only did git work: put the next known change, test or probe in the same script as the commit, so no turn is spent on git alone.")
     announce_scope_changes(P["session"])
     print_sessions(P["session"])
     print("\n=== RUN TIME: %.1fs ===" % (time.time() - t_start))
