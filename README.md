@@ -34,6 +34,9 @@ Several chats can work in the same project at once, each on its own goal:
 - Every other session is told about a scope change once, the next time it runs. The harness cannot push a message into another chat window; it informs each chat when that chat runs.
 - File changes made through the harness inside another session's scope are refused. Changes made by `@RUN` commands are detected and reported, not prevented, because the harness cannot know in advance what a command will write.
 - `@UNDO` only reverses the session's own scripts, and `@GIT_FOLD` is refused while other sessions hold scopes.
+- Each chat states its own aim with `@SESSION <name> | <aim>`; the project goal stays shared, and the footer shows this chat's session first, then the others.
+- Uncommitted work has an owner: a session cannot release its scope until its changes are committed (or explicitly handed over), cannot commit a file holding another active session's uncommitted changes, and is warned when it edits such a file.
+- Chats can leave each other notes with `@MESSAGE` and `@SCOPE_REQUEST`, shown once and labelled as coming from an AI, not from you. `@BRAKE` pauses another chat's changes until it acknowledges with `@BRAKE_ACK`; you can lift a brake with `--unbrake <session>`, and end a closed chat's session with `--release <session>`.
 - Only you can override a scope: `python harness.py --workspace <folder> --grant <session> <path or glob>` (or `--revoke`), typed in your own terminal. A script that tries to run it is refused.
 
 ## Install (once per machine)
@@ -95,7 +98,7 @@ Install codebase-memory-mcp (github.com/DeusData/codebase-memory-mcp) to enable 
 
 ## Developing the harness
 
-Work on this repository through the harness itself, with this folder as the workspace, then copy `harness.py` and `workflow_commands.txt` into `~/.llm_harness` (or rerun setup). Keep the tree in sync in the same script as each change.
+Work on this repository through the harness itself, with this folder as the workspace, then copy `harness.py` and `workflow_commands.txt` into `~/.llm_harness` (or rerun setup). Keep the tree in sync in the same script as each change. After changing the harness, run `python tests/scopes_test.py` and `python tests/concurrency_test.py` through `@RUN`; each prints PASS or FAIL per check and tests the installed copy.
 
 ## Limitations
 
