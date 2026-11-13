@@ -4,7 +4,7 @@
 # Stdlib only, OS-agnostic, pure-ASCII source. Reads one payload from stdin per run.
 # Install: save next to workflow_commands.txt in one folder (e.g. ~/.llm_harness), then run:
 #   python harness.py --workspace "<project folder>"
-import os, sys, re, json, glob, time, zlib, base64, fnmatch, hashlib, shutil, subprocess, warnings
+import os, sys, re, json, glob, time, zlib, base64, fnmatch, hashlib, shutil, contextlib, subprocess, warnings
 
 VERSION = "3.2"
 WORKSPACE_NOTES_DIR = ".llm_harness"
@@ -557,7 +557,7 @@ def check_files(changed, pre):
 
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
               "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD @SIDE "
-              "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP")
+              "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP @SESSION")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
 
@@ -574,7 +574,7 @@ def parse_payload(txt):
     """One state machine: directives are recognized only outside hunk and file bodies."""
     P = {"id": None, "num": None, "title": "", "workspace": None, "goal": None, "ops": [], "notes": [], "probes": [], "xrefs": [], "helps": [],
          "runs": [], "finds": [], "greps": [],
-         "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "warnings": []}
+         "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "session": None, "warnings": []}
     lines = txt.split("\n")
     n, i, cur_file, stray = len(lines), 0, None, []
 
@@ -598,6 +598,8 @@ def parse_payload(txt):
                 P["num"] = int(num.group(0)) if num else None
         elif d == "WORKSPACE":
             P["workspace"] = arg.strip().strip('"').strip("'")
+        elif d == "SESSION":
+            P["session"] = re.sub(r"[^A-Za-z0-9_.-]+", "-", arg).strip("-") or None
         elif d == "GOAL":
             if arg:
                 P["goal"] = arg
@@ -1887,6 +1889,101 @@ def payload_key(txt):
 def runs_dir():
     return os.path.join(HARNESS_DIR, "runs")
 
+LOCK_STALE_S, LOCK_WAIT_S = 120, 30
+
+@contextlib.contextmanager
+def state_lock():
+    """Cross-process lock around shared state updates; held only for those updates, never while commands run."""
+    os.makedirs(HARNESS_DIR, exist_ok=True)
+    path = os.path.join(HARNESS_DIR, "state.lock")
+    deadline = time.time() + LOCK_WAIT_S
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(path) > LOCK_STALE_S:
+                    os.remove(path)
+                    continue
+            except OSError:
+                pass
+            if time.time() > deadline:
+                raise RuntimeError("could not get the harness state lock at %s within %ds" % (path, LOCK_WAIT_S))
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+def assign_number(P, state):
+    """Give an unnumbered script the next free number, atomically across concurrent harness processes."""
+    with state_lock():
+        cur = load_json(STATE_PATH, {})
+        num = max(int(cur.get("last_num", 0)), state["last_num"]) + 1
+        P["num"], P["id"] = num, "%s-%d" % (P["id"] or "S", num)
+        cur["last_num"], cur["last_id"] = num, P["id"]
+        save_json(STATE_PATH, cur)
+    state["last_num"], state["last_id"] = P["num"], P["id"]
+
+def claim_number(P, state):
+    """Record a script's own number unless another process took it since this run started. -> claimed"""
+    with state_lock():
+        cur = load_json(STATE_PATH, {})
+        if P["num"] <= int(cur.get("last_num", 0)):
+            return False
+        cur["last_num"], cur["last_id"] = P["num"], P["id"]
+        save_json(STATE_PATH, cur)
+    state["last_num"], state["last_id"] = P["num"], P["id"]
+    return True
+
+def save_state(state):
+    """Write this run's state fields without rolling back numbers that other sessions took meanwhile."""
+    with state_lock():
+        cur = load_json(STATE_PATH, {})
+        for k in ("goal", "committed_through", "shell"):
+            if k in state:
+                cur[k] = state[k]
+        if state.get("last_num", 0) >= int(cur.get("last_num", 0)):
+            cur["last_num"], cur["last_id"] = state["last_num"], state["last_id"]
+        save_json(STATE_PATH, cur)
+
+def find_run_by_key(key):
+    """Saved run whose payload fingerprint matches, so an identical re-paste of an unnumbered script replays."""
+    for path in glob.glob(os.path.join(runs_dir(), "*.json")):
+        if not os.path.basename(path).startswith("side_"):
+            e = load_json(path, None)
+            if e and e.get("key") == key:
+                return e
+    return None
+
+def sessions_path():
+    return os.path.join(HARNESS_DIR, "sessions.json")
+
+def touch_session(P):
+    """Record a session's latest script and activity time in the project's session registry."""
+    with state_lock():
+        reg = load_json(sessions_path(), {})
+        rec = reg.get(P["session"], {})
+        rec["last_active"], rec["last_script"] = time.time(), P["id"]
+        reg[P["session"]] = rec
+        save_json(sessions_path(), reg)
+
+def print_sessions(current):
+    reg = load_json(sessions_path(), {})
+    if not reg:
+        return
+    print("=== SESSIONS (newest first) ===")
+    for name, rec in sorted(reg.items(), key=lambda kv: -kv[1].get("last_active", 0)):
+        age = time.time() - rec.get("last_active", 0)
+        when = "%dm ago" % (age // 60) if age < 7200 else "%dh ago" % (age // 3600)
+        print("  %s%s: last %s, %s" % (name, " (this chat)" if name == current else "", rec.get("last_script", "?"), when))
+
 def side_allowed(P):
     """A @SIDE script may only read, search and @RUN: no file, note, goal, git or undo actions."""
     return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"])
@@ -2130,7 +2227,8 @@ def print_card(shell, workspace):
         print("  $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); @'")
     else:
         print("  %s << 'HARNESS_EOF'" % call)
-    print("  @SCRIPT [<ACT>-<number>: <short title>]")
+    print("  @SCRIPT [<ACT>: <short title>]                 no number: the harness assigns one and prints [ASSIGNED]")
+    print("  @SESSION <short name for this chat's task>      the same name on every script of this chat")
     print("  @WORKSPACE %s" % workspace)
     print("  <directives>")
     if shell == "powershell":
@@ -2237,7 +2335,7 @@ def main():
         return print_footer(None)
     print("  Workspace: %s | %s" % (os.path.abspath("."), mode_label()))
     state = load_state()
-    start, rerun = len(tee.text()), False
+    start, rerun, assigned = len(tee.text()), False, False
     if P["side"]:
         if not side_allowed(P):
             print("  [REFUSED] a @SIDE script may only read, search and @RUN; file changes, notes, goal, git and undo belong to the numbered scripts of the chat that drives this project. Nothing was run.")
@@ -2249,8 +2347,14 @@ def main():
             return print_footer(state)
         print("  [SIDE] runs outside the numbering: no script number used, nothing journaled")
     elif P["num"] is None:
-        print("  [REFUSED] missing '@SCRIPT [<ACT>-<number>: <title>]' as the first payload line. Nothing was run.")
-        return print_footer(state)
+        prior = find_run_by_key(payload_key(raw_txt))
+        if prior:
+            print("  [REPLAY] [%s] already ran and this paste is identical, so nothing was run again. Its saved output:" % prior.get("id"))
+            print(prior.get("output", "").rstrip("\n"))
+            return print_footer(state)
+        assign_number(P, state)
+        assigned = True
+        print("  [ASSIGNED] " + P["id"])
     elif P["num"] <= state["last_num"]:
         prior = find_run(P["num"])
         if prior and prior.get("key") == payload_key(raw_txt):
@@ -2265,8 +2369,12 @@ def main():
         print("  [RE-RUN] [%s] is older than [%s] but only reads and has no saved output, so it runs again; the numbering is unchanged." % (P["id"], state["last_id"]))
     for w in P["warnings"]:
         print("  [WARNING] " + w)
-    if not rerun and not P["side"]:
-        state["last_num"], state["last_id"] = P["num"], P["id"]
+    if not rerun and not P["side"] and not assigned and not claim_number(P, state):
+        print("  [STALE OR DUPLICATE SCRIPT] [%s] was taken by another session a moment ago. Nothing was run." % P["id"])
+        print("  -> write @SCRIPT [<ACT>: <title>] without a number and the harness assigns a free one.")
+        return print_footer(state)
+    if P["session"]:
+        touch_session(P)
     if P["goal"]:
         state["goal"] = P["goal"]
         write_goal(P["goal"])
@@ -2314,8 +2422,9 @@ def main():
         timed(run_probe, pr)
     for h in P["helps"]:
         print_help(h, state.get("shell") or shell)
-    save_json(STATE_PATH, state)
+    save_state(state)
     save_run(P, raw_txt, tee.text()[start:])
+    print_sessions(P["session"])
     print("\n=== RUN TIME: %.1fs ===" % (time.time() - t_start))
     print_footer(state)
 
