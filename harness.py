@@ -1898,6 +1898,56 @@ def refs_in_scope(rel, lines, target):
     if external:
         print("  external calls: " + ", ".join(sorted(external)[:40]))
 
+CURRENT_SCRIPT, CURRENT_RUN = None, None
+
+def inspections_path():
+    return os.path.join(HARNESS_DIR, "inspections.json")
+
+def read_units(lines, a, b):
+    """The definitions a line range covers (innermost, qualified by their parent), plus whether it touched code outside any definition."""
+    defs = []
+    for j, ln in enumerate(lines):
+        info = def_info(ln)
+        if info and not SFC_BLOCK.match(ln):
+            s, e = block_bounds(lines, j, False)
+            defs.append((info[0], s, e))
+    units, outside = {}, False
+    for i in range(a, b):
+        cont = [d for d in defs if d[1] <= i < d[2]]
+        if not cont:
+            outside = outside or bool(lines[i].strip())
+            continue
+        d = min(cont, key=lambda x: x[2] - x[1])
+        parents = [p for p in defs if p is not d and p[1] <= d[1] and d[2] <= p[2]]
+        name = (min(parents, key=lambda x: x[2] - x[1])[0] + "." if parents else "") + d[0]
+        units[name] = (d[1], d[2])
+    return units, outside
+
+def note_inspection(rel, lines, a, b):
+    """Record what a read covered; say when the same definition was read before and has not changed since (context was lost, or it is still in context)."""
+    units, outside = read_units(lines, a, b)
+    seen = [(name + "()", hashlib.sha1("\n".join(lines[s:e]).encode("utf-8", "surrogateescape")).hexdigest()) for name, (s, e) in units.items()]
+    if outside:
+        seen.append(("(code outside definitions)", hashlib.sha1("\n".join(lines).encode("utf-8", "surrogateescape")).hexdigest()))
+    again, now = [], time.time()
+    with state_lock():
+        log = load_json(inspections_path(), {})
+        for name, fp in seen:
+            key = rel + "#" + name
+            prev = log.get(key)
+            if prev and prev.get("fp") == fp and prev.get("run") != CURRENT_RUN:
+                again.append((name, prev))
+            log[key] = {"fp": fp, "session": CURRENT_SESSION, "script": CURRENT_SCRIPT, "run": CURRENT_RUN, "time": now}
+        if len(log) > 5000:
+            log = dict(sorted(log.items(), key=lambda kv: kv[1].get("time", 0))[-4000:])
+        save_json(inspections_path(), log)
+    for name, prev in again[:6]:
+        age = now - prev.get("time", now)
+        when = "%dm" % (age // 60) if age < 7200 else ("%dh" % (age // 3600) if age < 172800 else "%dd" % (age // 86400))
+        print("  [REVISIT] /%s %s was read %s ago by %s (%s) and has not changed since" % (rel, name, when, "session " + prev["session"] if prev.get("session") else "a script without a session", prev.get("script") or "?"))
+    if len(again) > 6:
+        print("  [REVISIT] ... and %d more unchanged definitions read before" % (len(again) - 6))
+
 def run_probe(spec):
     parts = [p.strip() for p in spec.split("|")]
     rel = safe_rel(parts[0])
@@ -1929,6 +1979,7 @@ def run_probe(spec):
         a, b = max(1, int(m.group(1))), min(tot, int(m.group(2)))
         print("--- [On-Disk Lines %d-%d of %d] ---" % (a, b, tot))
         print("\n".join(lines[a - 1:b]))
+        note_inspection(rel, lines, a - 1, b)
     else:
         lo, hi, note = resolve_scope(rel, lines, target)
         if note:
@@ -1940,6 +1991,7 @@ def run_probe(spec):
         more = " | TRUNCATED at %dL: continue with Lines %d-%d" % (PROBE_CAP, cut + 1, hi) if cut < hi else ""
         print("--- [On-Disk Lines %d-%d of %d | Scope: %s%s] ---" % (lo + 1, cut, tot, target or "TOP", more))
         print("\n".join(lines[lo:cut]))
+        note_inspection(rel, lines, lo, cut)
 
 # ---------------------------------------------------------------- Stage: Entry point
 
@@ -2869,6 +2921,7 @@ def main():
     if P["session"]:
         touch_session(P)
     globals()["CURRENT_SESSION"] = P["session"]
+    globals()["CURRENT_SCRIPT"], globals()["CURRENT_RUN"] = P["id"], "%s@%.6f" % (P["id"], time.time())
     enforce_brake(P)
     send_messages(P)
     if P["scope"] is not None or P["scope_end"] or P["session_end"]:
