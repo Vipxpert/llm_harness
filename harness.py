@@ -2094,6 +2094,13 @@ def apply_scope_change(P):
         log["events"] = (log["events"] + [event])[-200:]
         save_json(events_path(), log)
     print("  [SCOPE] %s %s%s" % (me, event["kind"], (": " + event["aim"] + " | " + ", ".join(event["paths"])) if event["paths"] else ""))
+    if event["kind"] == "scope set":
+        files = repo_files(".")
+        covered = [f for f in files if any(path_in(f, g) for g in event["paths"])]
+        if files and (len(covered) > 200 or len(covered) * 3 > len(files)):
+            print("  [SCOPE WIDE] this scope covers %d of %d files, and every other session is refused all of them: narrow it to the files this task changes and widen it later if needed." % (len(covered), len(files)))
+        if any(literal_base(g) in ("", "docs", "docs/trees") for g in event["paths"]):
+            print("  -> tree files are shared by every session: claim the tree_*.txt files this task edits, not the whole trees folder.")
 
 def guard_ops(P):
     """Refuse file changes that fall inside another session's declared scope, unless the user granted them."""
