@@ -6,7 +6,7 @@
 #   python harness.py --workspace "<project folder>"
 import os, sys, re, json, glob, time, zlib, base64, fnmatch, hashlib, shutil, contextlib, subprocess, warnings
 
-VERSION = "3.3"
+VERSION = "3.4"
 WORKSPACE_NOTES_DIR = ".llm_harness"
 MODE = "git"
 HARNESS_DIR = os.path.join(".git", "llm_harness")
