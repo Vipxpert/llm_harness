@@ -58,7 +58,7 @@ After: <What you intend to do after receiving and reviewing this script's output
 Opportunistic alignment (`# Stage` comments, docstrings, tree sorting) exists ONLY to keep code that we are actively modifying (`C`) clean on the way. Halting feature work or generating standalone turns to add comments/anchors to untouched or merely-inspected files is a critical failure mode.
 
 - **L1 Rule — `[L1-Scope]`:** `Current request ONLY | 0 unrequested refactors/renames | 0 comment-, docstring-, format- or tree-only scripts | # Stage comments ONLY inside scopes whose logic this script modifies`
-- **L1 Rule — `[L1-Notes]`:** `@NOTE_ADD ONLY for facts a later session needs that code, tree, kb and ledgers don't hold (env quirks, user decisions, deferred work) | @NOTE_REMOVE once done or stale`
+- **L1 Rule — `[L1-Notes]`:** `Notes belong to the user: @NOTE_ADD / EDIT / REMOVE ONLY when the user explicitly asks in this conversation | otherwise suggest a note in one Talk line, never write it | a note is a standing fact, never a log of scripts, decisions, progress or to-dos`
 
 [Every-Turn Format — the conversation carries this pattern]:
 1. Micro-hunks with 1–3 context lines, at most 200 new/modified lines per script. Full files only for a small new file.

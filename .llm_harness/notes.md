@@ -1,3 +1,1 @@
-<!-- llm_harness_notes_next_id: 3 -->
-- [N001] CBM 0.12.1 refuses a CBM_CACHE_DIR inside this project tree ("could not load saved runtime settings"), while folders in %TEMP% and at D:\ work. Likely cause (not proven): CBM's private-directory check; icacls shows BUILTIN\Users has write access on the project folder but not on %TEMP%. The harness therefore leaves CBM on its default per-user cache.
-- [N002] Still untested on Windows: (1) graph search on a shared name, e.g. @XREF Start | callers in halagames-tools, which should list both Start methods, and @XREF lease.Start | callers, which retries with the full name CBM suggests; (2) the tree drift check finding real stale nodes, so far only proven in a sandbox; run it on halagames-tools' trees. Remove this note once both are confirmed.
+<!-- llm_harness_notes_next_id: 4 -->
