@@ -76,7 +76,7 @@ The syntax card printed by the handshake is the authoritative reference.
 
 ## Project memory and machine state
 
-- `.llm_harness/goal.md` and `.llm_harness/notes.md` are project memory: they travel with the project, so commit them. Notes are yours: the AI writes, edits or removes one only when you ask, and may suggest one in its reply otherwise. `.llm_harness/verdicts.json` keeps the AIs' recorded conclusions about folders, files and definitions (`@VERDICT`), so they travel too; a later change in a verdict's area marks it stale.
+- `.llm_harness/goal.md` and `.llm_harness/notes.md` are project memory: they travel with the project, so commit them. Notes are yours: the AI writes, edits or removes one only when you ask, and may suggest one in its reply otherwise. `.llm_harness/verdicts.json` keeps the AIs' recorded conclusions about folders, files and definitions (`@VERDICT`), so they travel too; a later change in a verdict's area marks it stale. For a sweep that needs a verdict on every area, you can start a `@CAMPAIGN` with its own verdict words: its rule and progress show in every footer while it runs, Tree probes mark finished nodes, and `@CAMPAIGN_END` removes its verdicts.
 - Script numbering, the undo journal, saved run outputs and the graph stamp are machine-local: in `.git/llm_harness/` for git projects, in `.llm_harness/` otherwise, and ignored by git.
 - `docs/trees/tree_master.txt` is the curated architecture tree. It is read level by level, updated in the same script as the code it describes, and `| Check` reports nodes that no longer match the code.
 
