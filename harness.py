@@ -557,7 +557,7 @@ def check_files(changed, pre):
 
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
               "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD @SIDE "
-              "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP @SESSION")
+              "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP @SESSION @SCOPE @SCOPE_END @SESSION_END")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
 
@@ -574,7 +574,8 @@ def parse_payload(txt):
     """One state machine: directives are recognized only outside hunk and file bodies."""
     P = {"id": None, "num": None, "title": "", "workspace": None, "goal": None, "ops": [], "notes": [], "probes": [], "xrefs": [], "helps": [],
          "runs": [], "finds": [], "greps": [],
-         "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "session": None, "warnings": []}
+         "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "session": None,
+         "scope": None, "scope_end": False, "session_end": False, "warnings": []}
     lines = txt.split("\n")
     n, i, cur_file, stray = len(lines), 0, None, []
 
@@ -600,6 +601,12 @@ def parse_payload(txt):
             P["workspace"] = arg.strip().strip('"').strip("'")
         elif d == "SESSION":
             P["session"] = re.sub(r"[^A-Za-z0-9_.-]+", "-", arg).strip("-") or None
+        elif d == "SCOPE":
+            P["scope"] = arg
+        elif d == "SCOPE_END":
+            P["scope_end"] = True
+        elif d == "SESSION_END":
+            P["session_end"] = True
         elif d == "GOAL":
             if arg:
                 P["goal"] = arg
@@ -801,6 +808,9 @@ def execute_ops(ops):
         if op.get("malformed"):
             op["status"], op["detail"] = "MALFORMED", op["malformed"]
             continue
+        if op.get("blocked"):
+            op["status"], op["detail"] = "REFUSED", op["blocked"]
+            continue
         rel = safe_rel(op["file"])
         if rel is None:
             op["status"], op["detail"] = "REFUSED", "path is outside the workspace or inside git or harness internals"
@@ -925,7 +935,7 @@ def save_history(P, raw_txt, hunk_log, files_log):
     if old_path:
         os.remove(old_path)
     name = "%04d_%s.json" % (P["num"], re.sub(r"[^A-Za-z0-9_-]", "_", P["id"]))
-    save_json(os.path.join(HISTORY_DIR, name), {"id": P["id"], "num": P["num"], "title": P["title"],
+    save_json(os.path.join(HISTORY_DIR, name), {"id": P["id"], "num": P["num"], "title": P["title"], "session": P.get("session"),
                                                  "payload": raw_txt, "hunks": hunk_log, "files": files_log})
     entries = sorted(glob.glob(os.path.join(HISTORY_DIR, "*.json")))
     for stale in entries[:max(0, len(entries) - MAX_HISTORY)]:
@@ -944,6 +954,9 @@ def run_undo(spec, state):
     for path in sorted(glob.glob(os.path.join(HISTORY_DIR, "*.json")), reverse=True):
         e = load_json(path, None)
         if not e or not (lo <= e.get("num", -1) <= hi):
+            continue
+        if CURRENT_SESSION and e.get("session") and e.get("session") != CURRENT_SESSION:
+            print("\n  [UNDO SKIPPED] [%s] belongs to session %s; undo it from that session." % (e["id"], e["session"]))
             continue
         seen += 1
         print("\n=== REVERSING [%s: %s] ===" % (e["id"], e["title"]))
@@ -1098,6 +1111,9 @@ def run_git_ops(ops):
     for op in ops:
         if op["kind"] == "fold":
             n = op["n"]
+            busy = [nm for nm, rec in load_json(sessions_path(), {}).items() if nm != CURRENT_SESSION and rec.get("scope")]
+            if busy:
+                return fail("@GIT_FOLD is blocked while other sessions hold scopes (%s): folding would rewrite their commits too" % ", ".join(busy))
             if folded or committed:
                 return fail("@GIT_FOLD must be the first and only fold in the script")
             if not orig or n < 1:
@@ -1472,6 +1488,9 @@ def run_command(cmd, timeout, shell):
     print("\n=== RUN: %s ===" % cmd)
     if GIT_WRITE_RE.search(cmd):
         print("  [REFUSED] git commands that change history or the working tree go through @GIT_COMMIT / @GIT_FOLD; pushing is left to the user.")
+        return
+    if re.search(r"harness\.py\b.*--(grant|revoke)\b", cmd, re.I):
+        print("  [REFUSED] --grant and --revoke are the user's own commands, typed in their terminal; a script never runs them.")
         return
     if shell == "powershell":
         prefix = "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
@@ -1982,11 +2001,193 @@ def print_sessions(current):
     for name, rec in sorted(reg.items(), key=lambda kv: -kv[1].get("last_active", 0)):
         age = time.time() - rec.get("last_active", 0)
         when = "%dm ago" % (age // 60) if age < 7200 else "%dh ago" % (age // 3600)
-        print("  %s%s: last %s, %s" % (name, " (this chat)" if name == current else "", rec.get("last_script", "?"), when))
+        sc = rec.get("scope")
+        scope = " | scope: %s (%s)" % (sc.get("aim") or "no aim", ", ".join(sc.get("paths", []))) if sc else " | no scope"
+        print("  %s%s: last %s, %s%s" % (name, " (this chat)" if name == current else "", rec.get("last_script", "?"), when, scope))
+
+CURRENT_SESSION = None
+
+def events_path():
+    return os.path.join(HARNESS_DIR, "scope_events.json")
+
+def grants_path():
+    return os.path.join(HARNESS_DIR, "grants.json")
+
+def path_in(path, pattern):
+    """True when a workspace path falls under a scope pattern: a plain folder or file, or a glob with * ? and **."""
+    p = pattern.strip().replace("\\", "/").lstrip("/")
+    if not p:
+        return False
+    if not any(c in p for c in "*?["):
+        p = p.rstrip("/")
+        return path == p or path.startswith(p + "/")
+    rx = re.escape(p).replace(r"\*\*", ".*").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+    return re.fullmatch(rx, path) is not None
+
+def literal_base(pattern):
+    """The fixed folder or file part of a scope pattern, before any wildcard ('' means the whole workspace)."""
+    p = pattern.strip().replace("\\", "/").lstrip("/")
+    cut = min([i for i in (p.find("*"), p.find("?"), p.find("[")) if i >= 0] or [len(p)])
+    if cut == len(p):
+        return p.rstrip("/")
+    return p[:cut].rsplit("/", 1)[0] if "/" in p[:cut] else ""
+
+def scope_overlap(paths_a, paths_b):
+    """Pattern pairs whose fixed parts nest; conservative, so two patterns in one folder count as overlapping."""
+    out = []
+    for x in paths_a:
+        for y in paths_b:
+            a, b = literal_base(x), literal_base(y)
+            if a == "" or b == "" or a == b or a.startswith(b + "/") or b.startswith(a + "/"):
+                out.append((x, y))
+    return out
+
+def granted(session, path):
+    return any(path_in(path, g) for g in load_json(grants_path(), {}).get(session or "", []))
+
+def scope_owner(path, me):
+    """(name, scope) of another session whose scope covers path, unless the user granted this session that path."""
+    for name, rec in load_json(sessions_path(), {}).items():
+        sc = rec.get("scope")
+        if name != me and sc and any(path_in(path, g) for g in sc.get("paths", [])) and not granted(me, path):
+            return name, sc
+    return None, None
+
+def apply_scope_change(P):
+    """@SCOPE / @SCOPE_END / @SESSION_END: update this session's write scope, refusing overlaps, and log the change for the other sessions."""
+    me = P["session"]
+    if not me:
+        print("  [REFUSED] @SCOPE, @SCOPE_END and @SESSION_END need an @SESSION line. Scopes are unchanged.")
+        return
+    with state_lock():
+        reg = load_json(sessions_path(), {})
+        rec = reg.setdefault(me, {})
+        if P["session_end"] or P["scope_end"]:
+            rec["scope"] = None
+            event = {"session": me, "kind": "session ended" if P["session_end"] else "scope released", "aim": "", "paths": []}
+            if P["session_end"]:
+                reg.pop(me, None)
+        else:
+            aim, _, raw = P["scope"].partition("|")
+            paths = [x.strip().replace("\\", "/").lstrip("/") for x in raw.split(",") if x.strip()]
+            if not paths:
+                print("  [REFUSED] @SCOPE needs '<aim> | <path or glob>, ...'. Scopes are unchanged.")
+                return
+            clashes = [(name, x, y) for name, other in reg.items() if name != me and other.get("scope")
+                       for x, y in scope_overlap(paths, other["scope"].get("paths", [])) if not granted(me, literal_base(x))]
+            if clashes:
+                print("  [SCOPE REFUSED] this scope overlaps another session's; scopes are unchanged:")
+                for name, x, y in clashes[:6]:
+                    print("    %s  overlaps  %s's  %s" % (x, name, y))
+                print("  -> narrow the scope, or tell the user: they can have that session release its scope, or grant this session the overlap with their own --grant command.")
+                return
+            rec["scope"] = {"aim": aim.strip(), "paths": paths}
+            event = {"session": me, "kind": "scope set", "aim": aim.strip(), "paths": paths}
+        save_json(sessions_path(), reg)
+        log = load_json(events_path(), {"seq": 0, "events": []})
+        log["seq"] += 1
+        event["seq"], event["time"] = log["seq"], time.time()
+        log["events"] = (log["events"] + [event])[-200:]
+        save_json(events_path(), log)
+    print("  [SCOPE] %s %s%s" % (me, event["kind"], (": " + event["aim"] + " | " + ", ".join(event["paths"])) if event["paths"] else ""))
+
+def guard_ops(P):
+    """Refuse file changes that fall inside another session's declared scope, unless the user granted them."""
+    if not P["ops"]:
+        return
+    for op in P["ops"]:
+        for path in (op.get("file"), op.get("to")):
+            owner, sc = scope_owner(path.strip().replace("\\", "/").lstrip("/"), P["session"]) if path else (None, None)
+            if owner:
+                op["blocked"] = "inside session %s's scope: %s; tell the user, who can coordinate or --grant it" % (owner, sc.get("aim") or "no aim")
+                break
+
+def watch_other_scopes(me):
+    """Fingerprints of the files inside other sessions' scopes, taken before @RUN so changes made by commands can be reported."""
+    pats = [(n, g) for n, rec in load_json(sessions_path(), {}).items() if n != me and rec.get("scope") for g in rec["scope"].get("paths", [])]
+    if not pats:
+        return None
+    marks = {}
+    for f in repo_files("."):
+        owners = [n for n, g in pats if path_in(f, g)]
+        if owners:
+            try:
+                st = os.stat(f)
+                marks[f] = (owners[0], st.st_size, st.st_mtime_ns)
+            except OSError:
+                pass
+    return {"marks": marks, "pats": pats}
+
+def report_scope_changes(watched):
+    """Detected, not prevented: report files in other sessions' scopes that @RUN commands created, changed or deleted."""
+    hits = []
+    for f, (owner, size, mt) in watched["marks"].items():
+        try:
+            st = os.stat(f)
+            if (st.st_size, st.st_mtime_ns) != (size, mt):
+                hits.append((owner, f, "changed"))
+        except OSError:
+            hits.append((owner, f, "deleted"))
+    for f in repo_files("."):
+        if f not in watched["marks"]:
+            owners = [n for n, g in watched["pats"] if path_in(f, g)]
+            if owners:
+                hits.append((owners[0], f, "created"))
+    if hits:
+        print("\n=== [SCOPE ALERT] @RUN changed files inside other sessions' scopes ===")
+        for owner, f, what in hits[:20]:
+            print("  /%s %s (session %s)" % (f, what, owner))
+        print("  -> stop and tell the user: these files belong to another session's work.")
+
+def announce_scope_changes(me):
+    """Show each scope change made by other sessions exactly once: everything newer than this session's cursor."""
+    if not me:
+        return
+    with state_lock():
+        reg = load_json(sessions_path(), {})
+        if me not in reg:
+            return
+        log = load_json(events_path(), {"seq": 0, "events": []})
+        first = "seen_seq" not in reg[me]
+        cursor = reg[me].get("seen_seq", 0)
+        reg[me]["seen_seq"] = log["seq"]
+        save_json(sessions_path(), reg)
+    if first:
+        others = [(n, r["scope"]) for n, r in reg.items() if n != me and r.get("scope")]
+        if others:
+            print("\n=== OTHER SESSIONS' SCOPES (first look) ===")
+            for n, sc in others:
+                print("  %s: %s | %s" % (n, sc.get("aim") or "no aim", ", ".join(sc.get("paths", []))))
+        return
+    new = [e for e in log["events"] if e["seq"] > cursor and e["session"] != me]
+    if new:
+        print("\n=== SCOPE CHANGES FROM OTHER SESSIONS (shown once) ===")
+        for e in new:
+            print("  %s %s%s" % (e["session"], e["kind"], (": " + e["aim"] + " | " + ", ".join(e["paths"])) if e["paths"] else ""))
+
+def grant_cli():
+    """User-only command: harness.py --workspace <folder> --grant|--revoke <session> <path or glob>."""
+    flag = "--revoke" if "--revoke" in sys.argv[1:] else "--grant"
+    args = sys.argv[1:]
+    i = args.index(flag)
+    sess = args[i + 1] if len(args) > i + 1 else ""
+    pattern = args[i + 2].replace("\\", "/").lstrip("/") if len(args) > i + 2 else ""
+    err = enter_workspace(arg_value("--workspace"))
+    if err or not sess or not pattern:
+        print("usage: harness.py --workspace <project folder> --grant <session> <path or glob>   (or --revoke)" + ((" | " + err) if err else ""))
+        return
+    with state_lock():
+        g = load_json(grants_path(), {})
+        cur = [p for p in g.get(sess, []) if p != pattern]
+        if flag == "--grant":
+            cur.append(pattern)
+        g[sess] = cur
+        save_json(grants_path(), g)
+    print("%s: session %s %s write access to %s despite other sessions' scopes" % (flag[2:].upper() + "ED" if flag == "--grant" else "REVOKED", sess, "gets" if flag == "--grant" else "loses", pattern))
 
 def side_allowed(P):
     """A @SIDE script may only read, search and @RUN: no file, note, goal, git or undo actions."""
-    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"])
+    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"])
 
 def side_run_path(raw_txt):
     return os.path.join(runs_dir(), "side_%s.json" % payload_key(raw_txt)[:16])
@@ -2012,7 +2213,7 @@ def find_run(num):
 
 def read_only(P):
     """True when a script only reads: no file, note, goal, git, undo or @RUN actions."""
-    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["runs"] or P["git_init"])
+    return not (P["ops"] or P["notes"] or P["goal"] or P["git"] or P["undo"] or P["runs"] or P["git_init"] or P["scope"] is not None or P["scope_end"] or P["session_end"])
 
 def load_state():
     """Numbering and shell from the machine-local state file; the goal from .llm_harness/goal.md, which travels with the project."""
@@ -2229,6 +2430,7 @@ def print_card(shell, workspace):
         print("  %s << 'HARNESS_EOF'" % call)
     print("  @SCRIPT [<ACT>: <short title>]                 no number: the harness assigns one and prints [ASSIGNED]")
     print("  @SESSION <short name for this chat's task>      the same name on every script of this chat")
+    print("  @SCOPE <aim> | <path or glob>, ...              (optional) the files this session will change; an overlap with another session's scope is refused")
     print("  @WORKSPACE %s" % workspace)
     print("  <directives>")
     if shell == "powershell":
@@ -2240,6 +2442,8 @@ def print_card(shell, workspace):
     print("""Directives:
   @GOAL <text>                                    pins the user's long-term goal in .llm_harness/goal.md (travels with the project); every run prints it in the footer
   @SIDE                                           runs the script outside the numbering (its @SCRIPT needs no number; only reads, searches and @RUN), so a second chat can work in a project another chat drives; an identical re-paste replays
+  @SCOPE <aim> | <path or glob>, ...              declares or changes this session's write scope; other sessions are told once; their scopes are refused to this session's file changes
+  @SCOPE_END    @SESSION_END                      release this session's scope / end the session and release everything
   @NOTE_ADD <text>                                adds a persistent workspace note
   @NOTE_EDIT <note-id> <text>                     edits an existing note
   @NOTE_REMOVE <note-id>                          removes an existing note
@@ -2321,6 +2525,8 @@ def main():
     if "--version" in sys.argv[1:]:
         print("llm_harness v%s" % VERSION)
         return
+    if "--grant" in sys.argv[1:] or "--revoke" in sys.argv[1:]:
+        return grant_cli()
     if len(sys.argv) > 1 or sys.stdin.isatty():
         handshake(arg_value("--workspace"), shell)
         return
@@ -2375,6 +2581,10 @@ def main():
         return print_footer(state)
     if P["session"]:
         touch_session(P)
+    globals()["CURRENT_SESSION"] = P["session"]
+    if P["scope"] is not None or P["scope_end"] or P["session_end"]:
+        apply_scope_change(P)
+    guard_ops(P)
     if P["goal"]:
         state["goal"] = P["goal"]
         write_goal(P["goal"])
@@ -2404,8 +2614,11 @@ def main():
     if P["notes"]:
         execute_note_ops(P["notes"])
     run_shell = state.get("shell") or shell
+    watched = watch_other_scopes(P["session"]) if P["runs"] else None
     for r in P["runs"]:
         run_command(r["cmd"], r["timeout"], run_shell)
+    if watched:
+        report_scope_changes(watched)
     if P["git_status"]:
         git_status_report()
     for d in P["list_dir"]:
@@ -2424,6 +2637,7 @@ def main():
         print_help(h, state.get("shell") or shell)
     save_state(state)
     save_run(P, raw_txt, tee.text()[start:])
+    announce_scope_changes(P["session"])
     print_sessions(P["session"])
     print("\n=== RUN TIME: %.1fs ===" % (time.time() - t_start))
     print_footer(state)
