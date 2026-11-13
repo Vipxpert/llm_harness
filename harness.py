@@ -557,7 +557,7 @@ def check_files(changed, pre):
 
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
               "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD @SIDE "
-              "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST")
+              "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
 
@@ -572,7 +572,7 @@ DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 
 def parse_payload(txt):
     """One state machine: directives are recognized only outside hunk and file bodies."""
-    P = {"id": None, "num": None, "title": "", "workspace": None, "goal": None, "ops": [], "notes": [], "probes": [], "xrefs": [],
+    P = {"id": None, "num": None, "title": "", "workspace": None, "goal": None, "ops": [], "notes": [], "probes": [], "xrefs": [], "helps": [],
          "runs": [], "finds": [], "greps": [],
          "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "warnings": []}
     lines = txt.split("\n")
@@ -695,6 +695,8 @@ def parse_payload(txt):
                 P["notes"].append({"action": "list"})
         elif d == "PROBE":
             P["probes"].append(arg)
+        elif d == "HELP":
+            P["helps"].append(arg)
         elif d == "XREF":
             P["xrefs"].append(arg)
         elif d == "LIST_DIR":
@@ -1957,6 +1959,7 @@ def print_footer(state):
         print("=== L1 CONTRACT (standing rules; apply, never echo) ===")
         for tag, body in rules:
             print("%s %s" % (tag, body.strip().strip("`").strip()))
+    print("[L1-Commands] " + " ".join(DIRECTIVES.split()) + " | syntax of any one: @HELP <name>")
 
 def enter_workspace(path):
     """chdir into the project a script names. Returns an error message, or None on success."""
@@ -2098,6 +2101,25 @@ GIT_CARD = """  @GIT_STATUS
   @GIT_COMMIT <type(scope): subject>  /<path> per line  @END_GIT_COMMIT   commits exactly those paths (list deleted and renamed-from paths too)
   @GIT_FOLD <n>                                   first git line only: reopens the last n unpushed commits so the @GIT_COMMIT blocks after it re-slice them
 """
+
+def print_help(name, shell):
+    """@HELP <directive>: the syntax-card lines for one directive, taken from the card itself so the two never disagree."""
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print_card(shell, os.path.abspath("."))
+    key = "@" + name.strip().lstrip("@").upper()
+    out, keep = [], False
+    for ln in buf.getvalue().split("\n"):
+        s = ln.strip()
+        if s.startswith("@"):
+            keep = re.search(r"(?<![\w@])" + re.escape(key) + r"(?!\w)", ln) is not None
+        elif not ln.startswith("  "):
+            keep = False
+        if keep:
+            out.append(ln)
+    print("\n=== HELP: %s ===" % key)
+    print("\n".join(out) if out else "  no directive named %s in this workspace's mode -> see [L1-Commands] in the footer" % key)
 
 def print_card(shell, workspace):
     """The whole payload grammar, printed once per session by the handshake."""
@@ -2290,6 +2312,8 @@ def main():
         timed(run_xref, s)
     for pr in P["probes"]:
         timed(run_probe, pr)
+    for h in P["helps"]:
+        print_help(h, state.get("shell") or shell)
     save_json(STATE_PATH, state)
     save_run(P, raw_txt, tee.text()[start:])
     print("\n=== RUN TIME: %.1fs ===" % (time.time() - t_start))
