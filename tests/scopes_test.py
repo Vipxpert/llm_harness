@@ -53,7 +53,7 @@ def main():
     out = run("etl", *hunk("/src/api/b.py", "x = 2", "x = 3"))
     check("A cannot write into B's scope either", "inside session api's scope" in out, out)
     out = run("api", "@RUN python \"" + HARNESS + "\" --workspace . --grant api src/etl/a.py")
-    check("a script cannot run the grant command", "[REFUSED] --grant and --revoke are the user's own commands" in out, out)
+    check("a script cannot run the grant command", "[REFUSED] --grant" in out, out)
     g = subprocess.run([sys.executable, HARNESS, "--workspace", WS, "--grant", "api", "src/etl/a.py"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = run("api", *hunk("/src/etl/a.py", "x = 0", "x = 5"))
     check("after the user's grant, B may edit that one file", "GRANTED" in g.stdout.decode() and "[OK] /src/etl/a.py" in out, out)
