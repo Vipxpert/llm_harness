@@ -562,7 +562,7 @@ def check_files(changed, pre):
 DIRECTIVES = ("@SCRIPT @WORKSPACE @GOAL @FILE @HUNK @NEW_FILE @DELETE_FILE @RENAME @RUN "
               "@PROBE @XREF @FIND @GREP @LIST_DIR @LIST_RECURSIVE @INIT_DEBUG @UNDO @GIT_INIT @GIT_STATUS @GIT_COMMIT @GIT_FOLD @SIDE "
               "@NOTE_ADD @NOTE_EDIT @NOTE_REMOVE @NOTE_LIST @HELP @SESSION @SCOPE @SCOPE_END @SESSION_END "
-              "@MESSAGE @SCOPE_REQUEST @BRAKE @BRAKE_ACK")
+              "@MESSAGE @SCOPE_REQUEST @BRAKE @BRAKE_ACK @REPEATABLE")
 DEBUG_SKELETON = """# Stage: Symptom & Target Invariant
 (replace: exact discrepancy between observed behavior and required state)
 
@@ -580,7 +580,7 @@ def parse_payload(txt):
     P = {"id": None, "num": None, "title": "", "workspace": None, "goal": None, "ops": [], "notes": [], "probes": [], "xrefs": [], "helps": [],
          "runs": [], "finds": [], "greps": [],
          "list_dir": [], "list_rec": [], "undo": None, "git": [], "git_status": False, "git_init": False, "side": False, "session": None,
-         "scope": None, "scope_end": False, "session_end": False, "session_aim": None, "msgs": [], "brake_ack": False, "warnings": []}
+         "scope": None, "scope_end": False, "session_end": False, "session_aim": None, "msgs": [], "brake_ack": False, "repeatable": False, "warnings": []}
     lines = txt.split("\n")
     n, i, cur_file, stray = len(lines), 0, None, []
 
@@ -616,6 +616,8 @@ def parse_payload(txt):
             P["session_end"] = arg.strip() or True
         elif d in ("MESSAGE", "SCOPE_REQUEST", "BRAKE"):
             P["msgs"].append(({"MESSAGE": "message", "SCOPE_REQUEST": "scope request", "BRAKE": "brake"}[d], arg))
+        elif d == "REPEATABLE":
+            P["repeatable"] = True
         elif d == "BRAKE_ACK":
             P["brake_ack"] = True
         elif d == "GOAL":
@@ -2625,6 +2627,7 @@ def print_card(shell, workspace):
     print("""Directives:
   @GOAL <text>                                    pins the user's long-term goal in .llm_harness/goal.md (travels with the project); every run prints it in the footer
   @SIDE                                           runs the script outside the numbering (its @SCRIPT needs no number; only reads, searches and @RUN), so a second chat can work in a project another chat drives; an identical re-paste replays
+  @REPEATABLE                                     the script runs on every paste, also an identical one, so the user can rerun it or edit its values by hand (no number; only reads, searches and @RUN)
   @SCOPE <aim> | <path or glob>, ...              declares or changes this session's write scope; other sessions are told once; their scopes are refused to this session's file changes
   @SCOPE_END    @SESSION_END                      release this session's scope / end the session; refused while its changes are uncommitted, unless followed by 'handover'
   @MESSAGE <session> | <text>                     a note for another session, shown once on its next run (labelled as from an AI, not the user)
@@ -2731,18 +2734,23 @@ def main():
     print("  Workspace: %s | %s" % (os.path.abspath("."), mode_label()))
     state = load_state()
     start, rerun, assigned = len(tee.text()), False, False
+    if P["repeatable"] and (P["num"] is not None or not side_allowed(P)):
+        print("  [REFUSED] a @REPEATABLE script has no number and may only read, search and @RUN, so running it again can never change files twice. Nothing was run.")
+        return print_footer(state)
+    if P["repeatable"]:
+        print("  [REPEATABLE] runs on every paste, also an identical one; edit its values and paste it again as often as needed")
     if P["side"]:
         if not side_allowed(P):
             print("  [REFUSED] a @SIDE script may only read, search and @RUN; file changes, notes, goal, git and undo belong to the numbered scripts of the chat that drives this project. Nothing was run.")
             return print_footer(state)
-        prior = load_json(side_run_path(raw_txt), None)
+        prior = None if P["repeatable"] else load_json(side_run_path(raw_txt), None)
         if prior:
             print("  [REPLAY] this @SIDE script already ran and this paste is identical, so nothing was run again. Its saved output:")
             print(prior.get("output", "").rstrip("\n"))
             return print_footer(state)
         print("  [SIDE] runs outside the numbering: no script number used, nothing journaled")
     elif P["num"] is None:
-        prior = find_run_by_key(payload_key(raw_txt))
+        prior = None if P["repeatable"] else find_run_by_key(payload_key(raw_txt))
         if prior:
             print("  [REPLAY] [%s] already ran and this paste is identical, so nothing was run again. Its saved output:" % prior.get("id"))
             print(prior.get("output", "").rstrip("\n"))
