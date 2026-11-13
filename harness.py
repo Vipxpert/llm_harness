@@ -1764,12 +1764,17 @@ def call_sites(name, limit=20):
                 info = def_info(ln)
                 if info and info[0] == name:
                     continue
-                out.append((f, i + 1, enclosing_definition(lines, i)))
+                anon = "(anonymous function)" if f.endswith((".go", ".js", ".mjs", ".ts", ".jsx", ".tsx", ".vue")) and indent_of(ln) > 0 else None
+                out.append((f, i + 1, enclosing_definition(lines, i) or anon))
     return out
 
 def print_call_sites(name):
     sites = call_sites(name)
-    print("  call sites (text): %d" % len(sites))
+    shared = len(definition_index().get(name, []))
+    if shared > 1:
+        print("  call sites (text, by name): %d; %d definitions are named %s, so some of these call another one" % (len(sites), shared, name))
+    else:
+        print("  call sites (text): %d" % len(sites))
     for f, n, fn in sites[:20]:
         print("    /%s:%d in %s" % (f, n, fn or "(top level)"))
     if len(sites) > 20:
