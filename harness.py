@@ -396,18 +396,25 @@ def find_exact(lines, needle, lo, hi):
     return [(i, i + n) for i in range(lo, hi - n + 1)
             if kx(lines[i]) == keys[0] and all(kx(lines[i + k]) == keys[k] for k in range(1, n))]
 
-def find_fuzzy(lines, needle, lo, hi):
+def kw(s):
+    return re.sub(r"\s+", " ", kf(s))
+
+def find_loose(lines, needle, lo, hi):
+    """Like find_fuzzy, but blind to whitespace inside lines (tabs pasted as spaces, realigned comments)."""
+    return find_fuzzy(lines, needle, lo, hi, kw)
+
+def find_fuzzy(lines, needle, lo, hi, key=kf):
     """Indentation-agnostic match that tolerates differing blank lines; returns every candidate span."""
-    keys = [kf(x) for x in needle if x.strip()]
+    keys = [key(x) for x in needle if x.strip()]
     out = []
     if not keys:
         return out
     for i in range(lo, hi):
-        if kf(lines[i]) != keys[0]:
+        if key(lines[i]) != keys[0]:
             continue
         j, k, last = i, 0, i
         while j < hi and k < len(keys):
-            s = kf(lines[j])
+            s = key(lines[j])
             if s:
                 if s != keys[k]:
                     break
@@ -460,18 +467,21 @@ def apply_match(rel, content, scope, find_s, repl_s):
     spans = [(lo, hi)] if note is None and (lo, hi) != (0, len(lines)) else []
     spans.append((0, len(lines)))
     for idx, (a, b) in enumerate(spans):
-        for finder, fuzzy in ((find_exact, False), (find_fuzzy, True)):
+        for finder, fuzzy in ((find_exact, False), (find_fuzzy, True), (find_loose, True)):
             hits = finder(lines, needle, a, b)
             if len(hits) == 1:
                 s, e = hits[0]
                 block = reindent(lines[s], first_nonblank(needle), repl) if fuzzy else repl
                 where = "matched outside the named scope, at line %d" % (s + 1) if idx == 1 and len(spans) == 2 else note
+                if finder is find_loose:
+                    where = "; ".join(x for x in (where, "matched ignoring whitespace inside lines") if x)
                 return "\n".join(lines[:s] + block + lines[e:]), "OK", where
             if len(hits) > 1:
                 where = ", ".join(str(h[0] + 1) for h in hits[:8])
                 tip = note or "add distinguishing context lines or a narrower scope"
                 return content, "AMBIGUOUS", "OLD CODE matches %d places (lines %s); %s" % (len(hits), where, tip)
-        if repl:
+    if repl:
+        for a, b in spans:
             rh = find_exact(lines, repl, a, b) or find_fuzzy(lines, repl, a, b)
             if len(rh) == 1:
                 return content, "ALREADY APPLIED", None
@@ -861,6 +871,10 @@ def tree_sync_reminder(changed, pre):
     if not os.path.isfile(TREE_MASTER) or any(is_tree_file(rel) for rel in changed):
         return
     notes = []
+    tree_text = "\n".join(read_text(t) for t in sorted(glob.glob(os.path.join("docs", "trees", "*.txt"))))
+    def in_trees(anchor):
+        name = re.sub(r"^\W*#?\s*(?:Stage|Step)\b\s*:?\s*", "", anchor).split(" (")[0].strip()
+        return bool(name) and name in tree_text
     for rel in changed:
         if rel.startswith("docs/trees/"):
             continue
@@ -871,8 +885,11 @@ def tree_sync_reminder(changed, pre):
         elif after is None:
             notes.append("/%s: file removed" % rel)
         elif before != after:
-            diff = ["+" + x for x in sorted(after - before)[:5]] + ["-" + x for x in sorted(before - after)[:5]]
-            notes.append("/%s: %s" % (rel, ", ".join(diff)))
+            tracked = any(in_trees(x) for x in before | after if ANCHOR_RE.match(x))
+            keep = lambda x: tracked or not ANCHOR_RE.match(x)
+            added, gone = [x for x in sorted(after - before) if keep(x)], [x for x in sorted(before - after) if keep(x)]
+            if added or gone:
+                notes.append("/%s: %s" % (rel, ", ".join(["+" + x for x in added[:5]] + ["-" + x for x in gone[:5]])))
     if notes:
         print("\n=== TREE SYNC REMINDER ===")
         for n in notes:
@@ -1002,6 +1019,9 @@ def execute_ops(ops):
     seen = set(op["status"] for op in ops)
     for st in ("MISMATCH", "AMBIGUOUS", "MALFORMED", "ROLLED BACK", "REFUSED"):
         if st in seen:
+            if st == "MALFORMED" and not any(op["status"] == "MALFORMED" and ("missing" in (op.get("detail") or "") or "expected '" in (op.get("detail") or "")) for op in ops):
+                print("  -> [MALFORMED]: fix what the parentheses above say, then resend that directive.")
+                continue
             print("  -> [%s]: %s" % (st, NEXT_STEPS[st]))
     if any("BUILD_PENDING" in v for v in checks.values()):
         print("  -> [BUILD_PENDING]: fix the errors listed under COMPILER DIAGNOSTICS in the next script.")

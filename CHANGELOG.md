@@ -12,6 +12,9 @@ Notable changes to llm_harness, newest first. Each `feat`, `fix` or `perf` commi
 - `+++ [LINE EDITS] +++` in hunks: change, delete or insert lines by their number inside the matched OLD CODE, without reciting the block twice.
 - `| depth N` on `@FIND`, `@GREP`, `@LIST_RECURSIVE` and `@TEXT_REPLACE`, and one glob rule for all of them: with a `/` a glob starts at the root and `*` stays in one folder; without one it matches file names at any depth.
 - Scopes may own a single definition (`file#Class.method`), leaving the rest of the file to other sessions, or a folder to a set depth (`pkg depth 1`).
+- A hunk counts as already applied only when its OLD CODE is found nowhere in the file, not merely outside its named scope.
+- A last matching pass ignores whitespace inside lines, so tabs pasted as spaces no longer cause mismatches.
+- `[MALFORMED]` hints fit the actual problem, and `# Stage` changes only trigger the tree reminder in files whose stages the trees track.
 
 ## 3.4
 
