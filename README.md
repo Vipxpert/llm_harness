@@ -41,15 +41,69 @@ Several chats can work in the same project at once, each on its own goal:
 
 ## Install (once per machine)
 
-Put `harness.py` and `workflow_commands.txt` in `~/.llm_harness`. `setup.cmd` (Windows) and `setup.sh` (Linux/macOS) do this for you, back up the previous version, offer to install or update the optional code graph (CBM), and pause at the end so you can read the result.
+The harness is two files, `harness.py` and `workflow_commands.txt`, installed into `.llm_harness` in your home folder. The setup scripts copy them there from the folder they sit in, keep a backup of the previous version, offer to install or update the optional code graph (CBM, which needs internet), and pause at the end so you can read the result.
+
+**Windows (PowerShell)**
+
+1. Check that Python 3.8 or newer and git are installed:
+
+        python --version; git --version
+
+2. Clone the harness into a folder of your choice, for example `E:\Work\Me`:
+
+        Set-Location E:\Work\Me; git clone https://github.com/Vipxpert/llm_harness.git
+
+3. Run the setup from the clone (or double-click `setup.cmd` in Explorer):
+
+        Set-Location E:\Work\Me\llm_harness; .\setup.cmd
+
+4. To update later, pull and run the setup again:
+
+        Set-Location E:\Work\Me\llm_harness; git pull; .\setup.cmd
+
+**Linux / macOS (terminal)**
+
+1. Check that Python 3.8 or newer and git are installed:
+
+        python3 --version; git --version
+
+2. Clone the harness, for example into your home folder:
+
+        git clone https://github.com/Vipxpert/llm_harness.git ~/llm_harness
+
+3. Run the setup (it uses curl or wget for the optional CBM; `NO_PAUSE=1` skips the final pause):
+
+        sh ~/llm_harness/setup.sh
+
+4. To update later, pull and run the setup again:
+
+        cd ~/llm_harness && git pull && sh setup.sh
 
 ## Start a session
 
-Run the handshake for the project folder:
+Run the handshake for the project folder you want to work on.
 
-    python $HOME\.llm_harness\harness.py --workspace "D:\path\to\project"
+Windows (PowerShell):
 
-Then open a new chat and paste three things: `workflow_commands.txt`, the handshake output, and your task. The handshake prints the syntax card (every directive and the exact fence wrapper for your shell), the project's goal and its notes. Use `--shell bash` for Git Bash or WSL. Projects with a `.git` folder run in git mode; any other folder runs in no-git mode, which keeps undo but has no git directives until `@GIT_INIT [Name <email>]` turns it into a repository, carrying its numbering and undo history over.
+    python "$HOME\.llm_harness\harness.py" --workspace "D:\path\to\project"
+
+Linux / macOS:
+
+    python3 ~/.llm_harness/harness.py --workspace ~/path/to/project
+
+On Windows with Git Bash or WSL, add `--shell bash` so the syntax card shows the bash wrapper.
+
+Then open a new chat and paste three things: `workflow_commands.txt`, the handshake output, and your task. The handshake prints the syntax card (every directive and the exact fence wrapper for your shell), the project's goal and its notes. Projects with a `.git` folder run in git mode; any other folder runs in no-git mode, which keeps undo but has no git directives until `@GIT_INIT [Name <email>]` turns it into a repository, carrying its numbering and undo history over.
+
+## Moving to another computer
+
+1. Install the harness on the new computer (the steps above), then clone or pull your project there.
+2. Run the handshake for the project. Your goal, notes, verdicts and campaigns come with the project, because they are committed in `.llm_harness/`.
+3. If the project uses its own commit identity, set it again: repository-local git settings do not travel with a clone.
+
+        git config user.name "Your Name"; git config user.email "you@example.com"
+
+Script numbering, undo history, saved run outputs, the session list and the reread log stay on each machine and start fresh on the new one; that is by design and harmless.
 
 ## What the AI can do
 
