@@ -9,6 +9,7 @@ Notable changes to llm_harness, newest first. Each `feat`, `fix` or `perf` commi
 - The cross-process state lock treats Windows' "delete pending" error as busy, so concurrent sessions no longer crash on it.
 - `CHANGELOG.md`, and a reminder when a `feat`, `fix` or `perf` commit leaves it out.
 - README: step-by-step install for Windows and Linux, session start for both, and moving to another computer.
+- `+++ [LINE EDITS] +++` in hunks: change, delete or insert lines by their number inside the matched OLD CODE, without reciting the block twice.
 
 ## 3.4
 

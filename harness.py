@@ -31,6 +31,39 @@ T_BAR = chr(0x2502)
 OLD_M, NEW_M, END_M = "--- [OLD CODE] ---", "+++ [NEW CODE] +++", "=== [END HUNK] ==="
 TXT_OLD, TXT_NEW, TXT_END = "--- [OLD TEXT] ---", "+++ [NEW TEXT] +++", "=== [END TEXT] ==="
 TEXT_MIN = 12
+LINE_M = "+++ [LINE EDITS] +++"
+
+def apply_line_edits(old, edits):
+    """New lines from a hunk's verified OLD CODE plus 'N: text' (replace), 'N-' (delete) and 'N+ text' (insert after N; 0 = before line 1). -> (lines, error)"""
+    repl, dels, ins = {}, set(), {}
+    for raw in edits:
+        if not raw.strip():
+            continue
+        m = re.match(r"^(\d+)([:+-])(.*)$", raw)
+        if not m:
+            return None, "line edit '%s' is not 'N: text', 'N-' or 'N+ text'" % raw.strip()
+        k, op, rest = int(m.group(1)), m.group(2), m.group(3)
+        rest = rest[1:] if rest.startswith(" ") else rest
+        if not (0 if op == "+" else 1) <= k <= len(old):
+            return None, "line %d is outside the %d recited OLD CODE lines" % (k, len(old))
+        if op == "+":
+            ins.setdefault(k, []).append(rest)
+        elif k in repl or k in dels:
+            return None, "line %d is edited twice" % k
+        elif op == "-":
+            if rest.strip():
+                return None, "'%d-' deletes the line and takes no text" % k
+            dels.add(k)
+        else:
+            repl[k] = rest
+    if not (repl or dels or ins):
+        return None, "no line edits under %s" % LINE_M
+    out = list(ins.get(0, []))
+    for n_, line in enumerate(old, 1):
+        if n_ not in dels:
+            out.append(repl.get(n_, line))
+        out.extend(ins.get(n_, []))
+    return out, None
 
 # ---------------------------------------------------------------- Stage: IO helpers
 
@@ -675,17 +708,23 @@ def parse_payload(txt):
                 bad("hunk", cur_file, label, "expected '%s' right after @HUNK" % OLD_M, i)
             else:
                 k = j + 1
-                while k < n and lines[k].rstrip() != NEW_M:
+                while k < n and lines[k].rstrip() not in (NEW_M, LINE_M):
                     k += 1
                 e = k + 1
                 while e < n and lines[e].rstrip() != END_M:
                     e += 1
                 old, new = lines[j + 1:k], lines[k + 1:e]
+                edit_err = None
+                if k < n and e < n and lines[k].rstrip() == LINE_M:
+                    new, edit_err = apply_line_edits("\n".join(old).strip("\n").split("\n"), new)
                 if k >= n:
-                    bad("hunk", cur_file, label, "missing '%s'" % NEW_M, i)
+                    bad("hunk", cur_file, label, "missing '%s' (or '%s')" % (NEW_M, LINE_M), i)
                 elif e >= n:
                     bad("hunk", cur_file, label, "missing '%s'" % END_M, i)
-                elif any(x.rstrip() in (OLD_M, NEW_M) for x in old + new) or any(x.rstrip() == END_M for x in old):
+                elif edit_err:
+                    bad("hunk", cur_file, label, edit_err, i)
+                    i = e
+                elif any(x.rstrip() in (OLD_M, NEW_M, LINE_M) for x in old + new) or any(x.rstrip() == END_M for x in old):
                     bad("hunk", cur_file, label, "a hunk terminator is missing before the next hunk; resend this hunk and the ones after it", i)
                     i = e
                 elif not cur_file:
@@ -2994,6 +3033,8 @@ def print_card(shell, workspace):
   +++ [NEW CODE] +++
   <replacement lines; leave empty to delete the old lines>
   === [END HUNK] ===
+  (or, in place of +++ [NEW CODE] +++ and its lines: +++ [LINE EDITS] +++ then one edit per line: 'N: new text' replaces line N,
+   'N-' deletes it, 'N+ text' inserts after it (0 = before line 1); N counts the recited OLD CODE lines from 1, so it is always verified)
   @NEW_FILE /<path>  <content>  @END_NEW_FILE     each on its own line; rejected if the file exists
   @DELETE_FILE /<path>
   @RENAME /<old> -> /<new>                        later hunks in the same script use the new path
