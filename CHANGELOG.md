@@ -10,6 +10,7 @@ Notable changes to llm_harness, newest first. Each `feat`, `fix` or `perf` commi
 - `CHANGELOG.md`, and a reminder when a `feat`, `fix` or `perf` commit leaves it out.
 - README: step-by-step install for Windows and Linux, session start for both, and moving to another computer.
 - `+++ [LINE EDITS] +++` in hunks: change, delete or insert lines by their number inside the matched OLD CODE, without reciting the block twice.
+- `| depth N` on `@FIND`, `@GREP`, `@LIST_RECURSIVE` and `@TEXT_REPLACE`, and one glob rule for all of them: with a `/` a glob starts at the root and `*` stays in one folder; without one it matches file names at any depth.
 
 ## 3.4
 

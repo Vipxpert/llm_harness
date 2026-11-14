@@ -739,7 +739,8 @@ def parse_payload(txt):
             target, _, rest = arg.partition("|")
             m = re.search(r"\bexpect\s+(\d+)", rest)
             expect = int(m.group(1)) if m else 1
-            label = re.sub(r"\bexpect\s+\d+", "", rest).strip(" |") or "Text replace"
+            md = re.search(r"\bdepth\s+(\d+)", rest)
+            label = re.sub(r"\b(expect|depth)\s+\d+", "", rest).strip(" |") or "Text replace"
             j = i + 1
             while j < n and not lines[j].strip():
                 j += 1
@@ -760,7 +761,8 @@ def parse_payload(txt):
                 elif len(old[0]) < TEXT_MIN:
                     bad("text", target.strip(), label, "OLD TEXT needs at least %d characters so it cannot hit the wrong place; include more of the line" % TEXT_MIN, i)
                 else:
-                    P["ops"].append({"type": "text", "file": target.strip(), "scope": "TEXT", "label": label, "find": old[0], "replace": new[0] if new else "", "expect": expect})
+                    P["ops"].append({"type": "text", "file": target.strip(), "scope": "TEXT", "label": label, "find": old[0], "replace": new[0] if new else "", "expect": expect,
+                                     "depth": int(md.group(1)) if md else None})
                 i = e
         elif d == "DELETE_FILE":
             P["ops"].append({"type": "delete", "file": arg, "scope": "TOP", "label": "Delete file"})
@@ -1283,14 +1285,15 @@ def repo_files(base):
     return sorted(set(f for f in files if not SKIP_DIRS.intersection(f.split("/")[:-1])))
 
 def run_list(arg, recursive):
+    arg, depth = split_depth(arg)
     dp = safe_rel(arg, allow_root=True)
     label = "RECURSIVE" if recursive else "NON-RECURSIVE"
     if dp is None or not os.path.isdir(dp):
         print("\n=== DIR LISTING (%s): /%s (NOT FOUND) ===" % (label, arg.strip().lstrip("/")))
         return
-    print("\n=== DIR LISTING (%s): /%s ===" % (label, "" if dp == "." else dp))
+    print("\n=== DIR LISTING (%s): /%s%s ===" % (label, "" if dp == "." else dp, " | depth %d" % depth if depth else ""))
     if recursive:
-        rows = repo_files(dp)
+        rows = [r for r in repo_files(dp) if within_depth(r, "" if dp == "." else dp, depth)]
     else:
         rows = [x + ("/" if os.path.isdir(os.path.join(dp, x)) else "") for x in sorted(os.listdir(dp)) if x != ".git"]
     for x in rows[:LIST_CAP]:
@@ -1520,21 +1523,46 @@ def graph_xref(sym, mode):
 
 # ---------------------------------------------------------------- Stage: File and text search
 
+def split_depth(arg):
+    """'<anything> | depth N' -> (<anything>, N); (arg, None) without it."""
+    m = re.search(r"\s*\|\s*depth\s+(\d+)\s*$", arg)
+    return (arg[:m.start()], int(m.group(1))) if m else (arg, None)
+
+def within_depth(rel, base, depth):
+    """True when rel sits at most depth folder levels below base ('' = the workspace root; 1 = directly inside)."""
+    if depth is None:
+        return True
+    if base and not rel.startswith(base + "/"):
+        return False
+    rest = rel[len(base) + 1:] if base else rel
+    return rest.count("/") + 1 <= depth
+
+def glob_files(pattern):
+    """Workspace files a glob names: with a '/' it starts at the root and * stays in one folder (** crosses folders); without one it matches file names at any depth."""
+    p = pattern.strip().replace("\\", "/").lstrip("/")
+    if "/" in p:
+        return [f for f in repo_files(".") if path_in(f, p)]
+    return [f for f in repo_files(".") if fnmatch.fnmatch(f.rsplit("/", 1)[-1], p)]
+
 def path_filter(pattern):
-    """Predicate for a path pattern: glob when it has wildcards (matched on path and file name), else case-insensitive substring."""
+    """Predicate for a path pattern: a glob (with a '/' it starts at the root and * stays in one folder; without one it matches file names at any depth), else a case-insensitive substring."""
     p = pattern.strip().replace("\\", "/").lstrip("/").lower()
     if any(c in p for c in "*?["):
-        return lambda rel: fnmatch.fnmatch(rel.lower(), p) or fnmatch.fnmatch(rel.rsplit("/", 1)[-1].lower(), p)
+        if "/" in p:
+            return lambda rel: path_in(rel.lower(), p)
+        return lambda rel: fnmatch.fnmatch(rel.rsplit("/", 1)[-1].lower(), p)
     return lambda rel: p in rel.lower()
 
 def run_find(pattern):
     """Files whose path or name matches a glob or substring."""
-    print("\n=== FIND: %s ===" % pattern.strip())
+    pattern, depth = split_depth(pattern)
+    print("\n=== FIND: %s%s ===" % (pattern.strip(), " | depth %d" % depth if depth else ""))
     if not pattern.strip():
         print("  [WARNING] @FIND needs a name, path fragment or glob, e.g. '@FIND lease' or '@FIND *.vue'")
         return
     keep = path_filter(pattern)
-    rows = [rel for rel in repo_files(".") if keep(rel)]
+    base = literal_base(pattern) if any(c in pattern for c in "*?[") else ""
+    rows = [rel for rel in repo_files(".") if keep(rel) and within_depth(rel, base, depth)]
     for rel in rows[:LIST_CAP]:
         print("  /" + rel)
     if len(rows) > LIST_CAP:
@@ -1543,11 +1571,12 @@ def run_find(pattern):
 
 def run_grep(arg):
     """Lines containing a text (case-insensitive) or matching a /regex/, optionally limited to paths after '| in'."""
+    arg, depth = split_depth(arg)
     text, sep, flt = arg.rpartition(" | in ")
     if not sep:
         text, flt = arg, ""
     text = text.strip()
-    print("\n=== GREP: %s%s ===" % (text, (" | in " + flt.strip()) if flt.strip() else ""))
+    print("\n=== GREP: %s%s%s ===" % (text, (" | in " + flt.strip()) if flt.strip() else "", " | depth %d" % depth if depth else ""))
     if not text:
         print("  [WARNING] @GREP needs a text or /regex/")
         return
@@ -1557,7 +1586,9 @@ def run_grep(arg):
     except re.error as e:
         print("  [WARNING] invalid regex: %s" % e)
         return
-    keep = path_filter(flt) if flt.strip() else (lambda rel: True)
+    in_flt = path_filter(flt) if flt.strip() else (lambda rel: True)
+    base = literal_base(flt) if any(c in flt for c in "*?[") else ""
+    keep = lambda rel: in_flt(rel) and within_depth(rel, base, depth)
     hits, files = [], set()
     for rel in repo_files("."):
         if not keep(rel):
@@ -2717,7 +2748,11 @@ def expand_text_ops(P):
             continue
         path, _, scope = op["file"].partition("#")
         target = path.strip().replace("\\", "/").lstrip("/")
-        files = [target] if target and os.path.isfile(target) else [f for f in repo_files(".") if path_in(f, target or "**")]
+        if target and os.path.isfile(target):
+            files = [target]
+        else:
+            named = glob_files(target) if any(c in target for c in "*?[") else [f for f in repo_files(".") if path_in(f, target or "**")]
+            files = [f for f in named if within_depth(f, literal_base(target), op.get("depth"))]
         hits, per_file = [], []
         for f in files:
             if safe_rel(f) is None or os.path.getsize(f) > 2000000:
@@ -3057,6 +3092,8 @@ def print_card(shell, workspace):
   @FIND <name, path fragment or glob>             files by name or path, e.g. @FIND lease or @FIND *.vue
   @GREP <text>  or  @GREP /<regex>/[i]            matching lines; add ' | in <path fragment or glob>' to limit where it looks
   @LIST_DIR /<path>    @LIST_RECURSIVE /<path>
+  (@FIND, @GREP, @LIST_RECURSIVE and @TEXT_REPLACE take a last '| depth N': at most N folder levels below the fixed part of the path, 1 = directly inside.
+   Globs: with a '/' they start at the workspace root and * stays in one folder, ** crosses folders; without a '/' they match file names at any depth.)
   @RUN [--timeout <s>] <command>                  any other command (tests, builds, installs, CLI tools) in the workspace; default limit 300s; not undoable
   @INIT_DEBUG <slug>                              creates docs/debug/bug_<slug>.txt with its four sections and prints it
   @UNDO <hi>..<lo>  or  @UNDO <number>            reverses journaled scripts, newest first
