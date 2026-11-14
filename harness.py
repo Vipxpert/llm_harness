@@ -2437,12 +2437,49 @@ def literal_base(pattern):
         return p.rstrip("/")
     return p[:cut].rsplit("/", 1)[0] if "/" in p[:cut] else ""
 
+def scope_item(item):
+    """A scope entry -> (path pattern, definition or '', depth or None): 'src/**', 'src depth 2' or 'src/a.py#Class.method'."""
+    s = item.strip()
+    m = re.search(r"\s+depth\s+(\d+)$", s)
+    if m:
+        s = s[:m.start()]
+    pat, _, sym = s.partition("#")
+    return pat.strip().replace("\\", "/").lstrip("/"), sym.strip(), int(m.group(1)) if m else None
+
+def scope_path_covers(path, item):
+    """True when a scope entry covers this file (a definition entry covers the file that holds it)."""
+    pat, _, depth = scope_item(item)
+    return path_in(path, pat) and within_depth(path, literal_base(pat), depth)
+
+def touches_symbol(path, sym, op):
+    """Whether a file change lands inside one definition of that file; unplaceable changes count as touching it."""
+    if not op or op.get("type") not in ("hunk", "text_file") or not os.path.isfile(path):
+        return True
+    lines = decode_bytes(read_bytes(path))[0].split("\n")
+    lo, hi, note = resolve_scope(path, lines, sym)
+    if note:
+        return False
+    if op["type"] == "text_file":
+        return any(lo <= i < hi for i in range(op["lo"], min(op["hi"], len(lines))) if op["find"] in lines[i])
+    old = [x.rstrip() for x in op.get("find", "").split("\n")]
+    if not any(old):
+        return hi >= len(lines) - 1
+    starts = [i for i in range(len(lines) - len(old) + 1) if [x.rstrip() for x in lines[i:i + len(old)]] == old]
+    if len(starts) != 1:
+        return True
+    return starts[0] < hi and starts[0] + len(old) > lo
+
 def scope_overlap(paths_a, paths_b):
-    """Pattern pairs whose fixed parts nest; conservative, so two patterns in one folder count as overlapping."""
+    """Entry pairs that can claim the same code: nesting fixed parts, except two definitions of one file, which overlap only when one contains the other."""
     out = []
     for x in paths_a:
         for y in paths_b:
-            a, b = literal_base(x), literal_base(y)
+            (px, sx, _), (py, sy, _) = scope_item(x), scope_item(y)
+            if sx and sy and px == py:
+                if sx == sy or sx.startswith(sy + ".") or sy.startswith(sx + "."):
+                    out.append((x, y))
+                continue
+            a, b = literal_base(px), literal_base(py)
             if a == "" or b == "" or a == b or a.startswith(b + "/") or b.startswith(a + "/"):
                 out.append((x, y))
     return out
@@ -2450,12 +2487,17 @@ def scope_overlap(paths_a, paths_b):
 def granted(session, path):
     return any(path_in(path, g) for g in load_json(grants_path(), {}).get(session or "", []))
 
-def scope_owner(path, me):
-    """(name, scope) of another session whose scope covers path, unless the user granted this session that path."""
+def scope_owner(path, me, op=None):
+    """(name, scope) of another session whose scope covers this change, unless the user granted this session that path; a definition entry only claims changes inside that definition."""
     for name, rec in load_json(sessions_path(), {}).items():
         sc = rec.get("scope")
-        if name != me and sc and any(path_in(path, g) for g in sc.get("paths", [])) and not granted(me, path):
-            return name, sc
+        if name == me or not sc or granted(me, path):
+            continue
+        for item in sc.get("paths", []):
+            if scope_path_covers(path, item):
+                sym = scope_item(item)[1]
+                if not sym or touches_symbol(path, sym, op):
+                    return name, dict(sc, owned=item)
     return None, None
 
 def apply_scope_change(P):
@@ -2488,7 +2530,7 @@ def apply_scope_change(P):
                 print("  [REFUSED] @SCOPE needs '<aim> | <path or glob>, ...'. Scopes are unchanged.")
                 return
             clashes = [(name, x, y) for name, other in reg.items() if name != me and other.get("scope")
-                       for x, y in scope_overlap(paths, other["scope"].get("paths", [])) if not granted(me, literal_base(x))]
+                       for x, y in scope_overlap(paths, other["scope"].get("paths", [])) if not granted(me, literal_base(scope_item(x)[0]))]
             if clashes:
                 print("  [SCOPE REFUSED] this scope overlaps another session's; scopes are unchanged:")
                 for name, x, y in clashes[:6]:
@@ -2506,7 +2548,7 @@ def apply_scope_change(P):
     print("  [SCOPE] %s %s%s" % (me, event["kind"], (": " + event["aim"] + " | " + ", ".join(event["paths"])) if event["paths"] else ""))
     if event["kind"] == "scope set":
         files = repo_files(".")
-        covered = [f for f in files if any(path_in(f, g) for g in event["paths"])]
+        covered = [f for f in files if any(scope_path_covers(f, g) for g in event["paths"])]
         if files and (len(covered) > 200 or len(covered) * 3 > len(files)):
             print("  [SCOPE WIDE] this scope covers %d of %d files, and every other session is refused all of them: narrow it to the files this task changes and widen it later if needed." % (len(covered), len(files)))
         if any(literal_base(g) in ("", "docs", "docs/trees") for g in event["paths"]):
@@ -2520,9 +2562,9 @@ def guard_ops(P):
     for op in P["ops"]:
         for path in (op.get("file"), op.get("to")):
             rel = path.strip().replace("\\", "/").lstrip("/") if path else ""
-            owner, sc = scope_owner(rel, P["session"]) if rel else (None, None)
+            owner, sc = scope_owner(rel, P["session"], op) if rel else (None, None)
             if owner:
-                op["blocked"] = "inside session %s's scope: %s; tell the user, who can coordinate or --grant it" % (owner, sc.get("aim") or "no aim")
+                op["blocked"] = "inside session %s's scope (%s): %s; tell the user, who can coordinate or --grant it" % (owner, sc.get("owned"), sc.get("aim") or "no aim")
                 break
             others = foreign_uncommitted(rel) if rel and P["session"] else []
             if others and rel not in warned:
@@ -2536,7 +2578,7 @@ def watch_other_scopes(me):
         return None
     marks = {}
     for f in repo_files("."):
-        owners = [n for n, g in pats if path_in(f, g)]
+        owners = [n for n, g in pats if scope_path_covers(f, g)]
         if owners:
             try:
                 st = os.stat(f)
@@ -2557,7 +2599,7 @@ def report_scope_changes(watched):
             hits.append((owner, f, "deleted"))
     for f in repo_files("."):
         if f not in watched["marks"]:
-            owners = [n for n, g in watched["pats"] if path_in(f, g)]
+            owners = [n for n, g in watched["pats"] if scope_path_covers(f, g)]
             if owners:
                 hits.append((owners[0], f, "created"))
     if hits:
@@ -3053,6 +3095,7 @@ def print_card(shell, workspace):
   @CAMPAIGN <name> | <word> = <meaning>; ...      starts a sweep (only when the user asks): its verdict words, a footer line and the [L1-Campaign] rule while it runs; Tree probes show <<verdict: ...>> on marked nodes
   @CAMPAIGN_END <name>                            ends the sweep and removes every verdict it recorded
   @SCOPE <aim> | <path or glob>, ...              declares or changes this session's write scope; other sessions are told once; their scopes are refused to this session's file changes
+  (a scope entry may be file#Class.method, claiming only that definition so others can still edit the rest of the file, or end with ' depth N')
   @SCOPE_END    @SESSION_END                      release this session's scope / end the session; refused while its changes are uncommitted, unless followed by 'handover'
   @MESSAGE <session> | <text>                     a note for another session, shown once on its next run (labelled as from an AI, not the user)
   @SCOPE_REQUEST <session> | <paths> | <reason>   asks that session to give up those paths; only its owner or the user can

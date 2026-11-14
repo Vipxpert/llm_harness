@@ -11,6 +11,7 @@ Notable changes to llm_harness, newest first. Each `feat`, `fix` or `perf` commi
 - README: step-by-step install for Windows and Linux, session start for both, and moving to another computer.
 - `+++ [LINE EDITS] +++` in hunks: change, delete or insert lines by their number inside the matched OLD CODE, without reciting the block twice.
 - `| depth N` on `@FIND`, `@GREP`, `@LIST_RECURSIVE` and `@TEXT_REPLACE`, and one glob rule for all of them: with a `/` a glob starts at the root and `*` stays in one folder; without one it matches file names at any depth.
+- Scopes may own a single definition (`file#Class.method`), leaving the rest of the file to other sessions, or a folder to a set depth (`pkg depth 1`).
 
 ## 3.4
 
