@@ -1,6 +1,7 @@
 # /llm_harness/docs/trees/tree_master.txt
 /llm_harness (Source of the LLM coding harness: one stdlib Python CLI, the workflow rules it prints, and installers that copy both into ~/.llm_harness)
 ├── .gitignore (Keeps machine-local harness state out of git; .llm_harness/goal.md and notes.md stay tracked)
+├── CHANGELOG.md (Notable changes per version, newest first; feat, fix and perf commits add their line under Unreleased)
 ├── harness.py (Declarative patch / probe / search / run / undo / git CLI; reads one payload from stdin per run; git and no-git workspaces)
     ├── # Stage: IO helpers (Byte-exact file IO keeping EOL style, BOM and undecodable bytes; payload decoding with UI-safe sentinels; workspace path guard)
     ├── # Stage: Line-1 header and tree glyphs (Inserts the /<project>/<path> first-line comment below shebangs; turns ASCII tree connectors into box glyphs)
