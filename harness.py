@@ -519,7 +519,8 @@ def check_files(changed, pre):
                 rolled.add(rel)
                 status[rel] = "SYNTAX ERROR -> restored (%s)" % " ".join(str(e).split())[:160]
         elif rel.endswith(".go"):
-            rc, out, err = run_tool(["gofmt", "-e", "-d", rel])
+            before = sha_of(rel)
+            rc, out, err = run_tool(["gofmt", "-e", "-w", rel])
             if rc is None:
                 status[rel] = "UNCHECKED (gofmt not found)"
             elif rc != 0:
@@ -527,8 +528,8 @@ def check_files(changed, pre):
                 restore_pre(rel, pre[rel]["raw"], pre[rel]["mode"])
                 rolled.add(rel)
                 status[rel] = "GOFMT ERROR -> restored (%s)" % msg[:160]
-            elif out.strip():
-                status[rel] = "PASS (gofmt differences; not rewritten)"
+            elif sha_of(rel) != before:
+                status[rel] = "PASS (formatted by gofmt, e.g. spaces from the chat turned back into tabs)"
             else:
                 status[rel] = "PASS"
         elif rel.endswith(".json"):
@@ -773,14 +774,17 @@ def parse_payload(txt):
             P["git"].append({"kind": "fold", "n": int(arg) if arg.isdigit() else 0})
         elif d == "GIT_COMMIT":
             j = i + 1
-            while j < n and lines[j].rstrip() != "@END_GIT_COMMIT":
+            while j < n and lines[j].rstrip() != "@END_GIT_COMMIT" and not lines[j].lstrip().startswith("@"):
                 j += 1
-            if j >= n:
-                P["warnings"].append("@GIT_COMMIT at payload line %d has no @END_GIT_COMMIT; ignored" % (i + 1))
-            else:
-                paths = [x.strip() for x in lines[i + 1:j] if x.strip() and not x.startswith("#")]
+            closed = j < n and lines[j].rstrip() == "@END_GIT_COMMIT"
+            paths = [x.strip() for x in lines[i + 1:j] if x.strip() and not x.startswith("#")]
+            if not closed:
+                P["warnings"].append("@GIT_COMMIT at payload line %d had no @END_GIT_COMMIT; its path list was closed at the %s -> end every path list with @END_GIT_COMMIT" % (i + 1, "next directive" if j < n else "end of the script"))
+            if paths:
                 P["git"].append({"kind": "commit", "msg": arg, "paths": paths})
-                i = j
+            else:
+                P["warnings"].append("@GIT_COMMIT at payload line %d lists no paths; ignored" % (i + 1))
+            i = j if closed else j - 1
         else:
             P["warnings"].append("unknown directive @%s at payload line %d was ignored -> valid directives: %s" % (d, i + 1, DIRECTIVES))
         i += 1
@@ -2239,7 +2243,8 @@ def state_lock():
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
             break
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # Windows refuses to create a file another process is deleting ("delete pending"): the lock is still busy
             try:
                 if time.time() - os.path.getmtime(path) > LOCK_STALE_S:
                     os.remove(path)
