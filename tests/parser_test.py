@@ -40,6 +40,20 @@ def main():
     check("a commit without @END_GIT_COMMIT closes at the next directive and still commits", "[COMMITTED]" in out and "had no @END_GIT_COMMIT" in out and "closed at the next directive" in out, out)
     out = run("@GIT_COMMIT chore: nothing", "@GIT_STATUS")
     check("a commit with no paths is ignored with a warning", "lists no paths; ignored" in out and "[COMMITTED]" not in out, out)
+    with open(os.path.join(WS, "CHANGELOG.md"), "w") as f:
+        f.write("# Changelog\n\n## Unreleased\n")
+    git("add", "CHANGELOG.md")
+    git("commit", "-qm", "changelog")
+    with open(os.path.join(WS, "a.txt"), "w") as f:
+        f.write("c\n")
+    out = run("@GIT_COMMIT feat: change a again", "/a.txt", "@END_GIT_COMMIT")
+    check("a feat commit without CHANGELOG.md gets a reminder", "CHANGELOG.md was not in this feat commit" in out, out)
+    with open(os.path.join(WS, "a.txt"), "w") as f:
+        f.write("d\n")
+    with open(os.path.join(WS, "CHANGELOG.md"), "a") as f:
+        f.write("- changed a\n")
+    out = run("@GIT_COMMIT fix: change a with its changelog line", "/a.txt", "/CHANGELOG.md", "@END_GIT_COMMIT")
+    check("a fix commit that includes CHANGELOG.md gets no reminder", "[COMMITTED]" in out and "CHANGELOG.md was not" not in out, out)
     if shutil.which("gofmt"):
         with open(os.path.join(WS, "m.go"), "w", newline="\n") as f:
             f.write("package main\n\nfunc main() {\n\tx := 1\n\t_ = x\n}\n")

@@ -1220,6 +1220,9 @@ def run_git_ops(ops):
                 return fail("git commit '%s': %s" % (op["msg"], ((err or out).strip().splitlines() or ["error"])[-1]))
             committed = True
             print("  [COMMITTED] %s %s (%d path(s))" % (run_git(["rev-parse", "--short", "HEAD"])[1], op["msg"], len(paths)))
+            kind = re.match(r"^(feat|fix|perf)\b", op["msg"])
+            if kind and os.path.isfile("CHANGELOG.md") and "CHANGELOG.md" not in paths:
+                print("  -> CHANGELOG.md was not in this %s commit: add a line under '## Unreleased' and commit it with the next change" % kind.group(1))
     if folded and fold_paths:
         _, left, _ = run_git(["status", "--porcelain", "--"] + fold_paths)
         if left.strip():
